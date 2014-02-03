@@ -1,8 +1,11 @@
 import os, sys, re, weakref
 import callgraph
 
-compile_cmd = 'make -j6 >/tmp/make.log'
-test_cmd = 'make -j6 test >/tmp/test.log'
+compile_log = '/tmp/make.log'
+compile_cmd = 'make -j6 >%s 2>&1' % compile_log
+clean_cmd = 'make clean >/dev/null 2>&1'
+test_log = '/tmp/test.log'
+test_cmd = 'make -j6 test >%s 2>&1' % test_log
 comment_pat = re.compile(r'/\*.*?\*/')
 datatype_names = 'int|short|long|double|float|char|bool'.split('|')
 moab_type_pat = re.compile('.*\Wm[a-z_0-9]+_t$')
@@ -128,7 +131,7 @@ class Prototype:
         i = txt.find('(', match.end(1)) + 1
         j = txt.rfind(')', match.end())
         param_list = txt[i:j]
-        # Remove comments that might confuse us
+        # Remove comments that might confuse us.
         param_list = comment_pat.sub('', param_list)
         param_list = cut_cpp_comments(param_list)
         # Now split what's left. We can't just split on commas in
@@ -137,7 +140,7 @@ class Prototype:
         # of their own...
         self.params = split_params(param_list)
     def get_ideal(self):
-        return self.
+        return '%s %s %s' % (self.return_type, self.match.group(2), self.match.group(3))
     def is_in_tests(self):
         return 'test/' in self.fpath
     def is_in_header(self):
@@ -154,7 +157,12 @@ class Prototype:
         if len(self.args) == len(other.args):
             for i in xrange(len(self.args)):
                 type_a = self.get_arg_type(i)
-                type_b = self.
+                type_b = self.get_arg_type(i)
+                if type_a != type_b:
+                    return False
+        else:
+            return False
+        return True
 
 def update_param_names(prototypes):
     if len(prototypes) < 2:
@@ -256,11 +264,10 @@ def tests_pass(root):
     oldcwd = os.getcwd()
     try:
         os.chdir(root)
-        exitcode = os.system(compile_cmd)
+        exitcode = os.system(test_cmd)
         if exitcode:
-            os.system('make clean > /tmp/x')
-            exitcode = os.system(compile_cmd)
-        return exitcode
+            print('Tests failed. See %s for details.' % test_log)
+        return exitcode == 0
     finally:
         os.chdir(oldcwd) 
 
@@ -271,9 +278,11 @@ def compile_is_clean(root):
         os.chdir(root)
         exitcode = os.system(compile_cmd)
         if exitcode:
-            os.system('make clean > /tmp/x')
+            os.system(make_clean_cmd)
             exitcode = os.system(compile_cmd)
-        return exitcode
+            if exitcode:
+                print('Clean compile failed. See %s for details.' % compile_log)
+        return exitcode == 0
     finally:
         os.chdir(oldcwd) 
 
@@ -336,10 +345,10 @@ def fix_prototypes(root):
         sys.stderr.write('Folder %s is not the root of a codebase.\n' % root)
         return 1
     if not compile_is_clean(root):
-        sys.stderr.write('Code in %s does not compile cleanly. Prototype fixup aborted.\n' % root)
+        sys.stderr.write('Prototype fixup in %s aborted.\n' % root)
         return 1
-    if not tests_pass(root):
-        sys.stderr.write('Code in %s does not compile cleanly. Prototype fixup aborted.\n' % root)
+    if False and not tests_pass(root):
+        sys.stderr.write('Prototype fixup in %s aborted.\n' % root)
         return 1
     pass_number = 1
     cg = callgraph.Callgraph(root)
@@ -347,7 +356,8 @@ def fix_prototypes(root):
         leaves = cg.get_leaves()
         print('\nPass %d: %d leaves out of %d functions...\n' % pass_number, len(leaves), len(cg.by_callee))
         for func in leaves:
-            fix_func(func, root, cg)
+            print('fixing %s' % func)
+            #fix_func(func, root, cg)
 
 if __name__ == '__main__':
     if len(sys.argv) > 1:

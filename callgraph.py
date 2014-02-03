@@ -73,9 +73,11 @@ def _get_vcs_date(folder):
 class Callgraph:
     def __init__(self, root):
         self.root = os.path.normpath(os.path.abspath(root))
+        self.load()
     def load(self):
         doxy_lastmod = _get_doxy_date(doxy_output_folder)
         vcs_lastmod = _get_vcs_date(self.root)
+        print('doxy_lastmod = %s; vcs_lastmod = %s' % (doxy_lastmod, vcs_lastmod))
         if doxy_lastmod < vcs_lastmod:
             print('Re-running doxygen. Tail %s to monitor...' % doxy_log)
             error = _call_doxygen(self.root)
