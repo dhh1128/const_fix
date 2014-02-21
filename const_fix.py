@@ -3,9 +3,11 @@ import callgraph
 
 compile_log = '/tmp/make.log'
 compile_cmd = 'make -j6 >%s 2>&1' % compile_log
-clean_cmd = 'make clean >/dev/null 2>&1'
+compile_tests_cmd = 'scons -n -j6 >%s 2>&1' % compile_log
+make_clean_cmd = 'make clean >/dev/null 2>&1'
+clean_tests_cmd = 'scons -c'
 test_log = '/tmp/test.log'
-test_cmd = 'make -j6 test >%s 2>&1' % test_log
+test_cmd = 'scons -j6 >%s 2>&1' % test_log
 comment_pat = re.compile(r'/\*.*?\*/')
 datatype_names = 'int|short|long|double|float|char|bool'.split('|')
 moab_type_pat = re.compile('.*\Wm[a-z_0-9]+_t$')
@@ -13,6 +15,10 @@ const_prefix_pat = re.compile('^const ([a-zA-Z0-9_]+)(.*)$')
 const_suffix_pat = re.compile('([a-zA-Z0-9_]+)\s+const.*')
 array_spec_pat = re.compile('.*(\[^]]\])$')
 prototype_pat_template = r'^\s*((?:[_a-zA-Z][_a-zA-Z0-9:]*)[^-()=+!<>/|^]*?(?:\s+|\*|\?))(%s)\s*\(([^()]*?)\)(\s*const)?\s*([{;])'
+
+def run(cmd):
+    print('  ' + cmd)
+    return os.system(cmd)
 
 def squeeze(txt):
     '''Replace all runs of whitepace with a single space, and trim front and back.'''
@@ -263,10 +269,12 @@ def tests_pass(root):
     print('Testing...')
     oldcwd = os.getcwd()
     try:
-        os.chdir(root)
-        exitcode = os.system(test_cmd)
+        os.chdir(os.path.join(root, 'test'))
+        exitcode = run(test_cmd)
         if exitcode:
-            print('Tests failed. See %s for details.' % test_log)
+            print('Tests failed. See %s for details.\n' % test_log)
+        else:
+            print('Tests pass.\n')
         return exitcode == 0
     finally:
         os.chdir(oldcwd) 
@@ -276,12 +284,22 @@ def compile_is_clean(root):
     oldcwd = os.getcwd()
     try:
         os.chdir(root)
-        exitcode = os.system(compile_cmd)
+        exitcode = run(compile_cmd)
         if exitcode:
-            os.system(make_clean_cmd)
-            exitcode = os.system(compile_cmd)
+            print('  Incremental compile failed. Trying to clean.')
+            run(make_clean_cmd)
+            exitcode = run(compile_cmd)
+        if not exitcode:
+            os.chdir(os.path.join(root, 'test'))
+            run(compile_tests_cmd)
             if exitcode:
-                print('Clean compile failed. See %s for details.' % compile_log)
+                print('  Incremental compile of tests failed. Trying to clean.')
+                run(clean_tests_cmd)
+                exitcode = run(compile_tests_cmd)
+        if exitcode:
+            print('Clean compile failed. See %s for details.\n' % compile_log)
+        else:
+            print('Compile succeeded.\n')
         return exitcode == 0
     finally:
         os.chdir(oldcwd) 
@@ -339,25 +357,89 @@ def fix_func(func, root, cg):
             else:
                 recompile = False
                 
+IRRELEVANT_FUNC = 0
+CONST_MATTERS = 1
+OBNOXIOUS_CONST = 2
+
+def _classify_func(params):
+    cls = IRRELEVANT_FUNC
+    if params:
+        for p in params:
+            if ('*' in p or '&' in p) and ('const' not in p):
+                return CONST_MATTERS
+            elif 'const' in p:
+                cls = OBNOXIOUS_CONST
+    return cls            
+                
 def fix_prototypes(root):
+    print('')
     root = os.path.normpath(os.path.abspath(root))
     if not os.path.isfile(os.path.join(root, 'Makefile')):
-        sys.stderr.write('Folder %s is not the root of a codebase.\n' % root)
+        sys.stderr.write('Did not find Makefile at root of codebase %s.\n' % root)
         return 1
-    if not compile_is_clean(root):
-        sys.stderr.write('Prototype fixup in %s aborted.\n' % root)
-        return 1
-    if False and not tests_pass(root):
-        sys.stderr.write('Prototype fixup in %s aborted.\n' % root)
-        return 1
-    pass_number = 1
+    
+    ok = True
+    if False:
+        print('Verifying that codebase is clean before we start...\n')
+        if not compile_is_clean(root):
+            ok = False
+        if not tests_pass(root):
+            ok = False
+        if not ok:
+            sys.stderr.write('Prototype fixup in %s aborted.\n' % root)
+            return 1
+    else:
+        print('Skipping initial verification; please re-enable later in script.')
+    
+    print('Loading call graph...')
+    pass_number = 0
     cg = callgraph.Callgraph(root)
+    tried_to_prune = False
     while not cg.is_empty():
+        pass_number += 1
         leaves = cg.get_leaves()
-        print('\nPass %d: %d leaves out of %d functions...\n' % pass_number, len(leaves), len(cg.by_callee))
+        print('\nPass %d: %d leaves out of %d functions...\n' % (pass_number, len(leaves), len(cg.by_callee)))
+        if len(leaves) == 0:
+            # See if we can prune some stuff away by finding functions where const doesn't matter.
+            if tried_to_prune:
+                print('Stuck; no functions are leaves.')
+                sys.exit(1)
+            else:
+                tried_to_prune = True
+                to_prune = []
+                for func in cg.by_caller:
+                    params = None
+                    if func in cg.params_by_caller:
+                        params = cg.params_by_caller[func]
+                    cls = _classify_func(params)
+                    if cls != CONST_MATTERS:
+                        to_prune.append(func)
+                print('pruning %d items: %s' % (len(to_prune), to_prune))
+                for item in to_prune:
+                    cg.remove(item)
+                continue
+        else:
+            tried_to_prune = False
         for func in leaves:
-            print('fixing %s' % func)
-            #fix_func(func, root, cg)
+            callers = None
+            if func in cg.by_callee:
+                callers = cg.by_callee[func]
+            if not callers:
+                print('%s appears to be an orphan, never called.' % func)
+            else:
+                print('%s called by %s' % (func, callers))
+            params = None
+            if func in cg.params_by_caller:
+                params = cg.params_by_caller[func]
+            cls = _classify_func(params)
+            if cls == CONST_MATTERS:
+                print('fixing %s' % func)
+                #fix_func(func, root, cg)
+            elif cls == OBNOXIOUS_CONST:
+                print('%s should not use const, but does.' % func)
+            else:
+                print("Constness is not relevant to %s." % func)
+            cg.remove(func)
 
 if __name__ == '__main__':
     if len(sys.argv) > 1:
