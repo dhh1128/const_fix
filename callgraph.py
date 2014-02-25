@@ -35,9 +35,9 @@ def _remove_name_with_typedef(func, names):
     if found. We only call it if exact matching hasn't helped us.
     '''
     if names:
-        print('trying to remove %s from %s' % (func, names))
+        #print('trying to remove %s from %s' % (func, names))
         cls, method = _split_method_name(func)
-        print('split = %s, %s' % (cls, method))
+        #print('split = %s, %s' % (cls, method))
         if cls:
             possible_names = [cls.upper(), cls.lower()]
             if cls.endswith('_t'):
@@ -121,8 +121,6 @@ def _analyze(fname, by_caller, by_callee, params_by_caller):
                         caller = match.group(1)
                         if caller not in x:
                             x.append(caller)
-                            if 'HowManyFit' in caller:
-                                print('adding %s as caller of %s' % (caller, funcname))
                             caller_count += 1
                 #print('  %s: calls %d, called by %d' % (funcname, called_count, caller_count))
     return True 
@@ -185,6 +183,9 @@ class Callgraph:
             self.by_callee[callee].sort()
         print('  Breaking recursion...')
         self._break_simple_recursion()
+    def get_params(self, func):
+        if func in self.params_by_caller:
+            return self.params_by_caller[func]
     def get_orphans(self):
         orphans = []
         for func in self.by_callee:
@@ -218,12 +219,17 @@ class Callgraph:
                         pass
                     else:
                         if caller not in self.by_caller or not _remove_name_with_typedef(func, self.by_caller[caller]):
-                            if 'MSNL' not in func and 'MSNL' not in caller:
-                                print("Couldn't remove %s from the called list for %s." % (func, caller))
+                            # Special case; moab codebase uses typedefs in an unfortunate way with MSNL, which causes
+                            # inconsistency in doxygen output. Ignore...
+                            if 'MSNL' in func or 'MSNL' in caller:
+                                pass
+                            else:
                                 x = []
                                 if caller in self.by_caller:
                                     x = self.by_caller[caller]
-                                print('Here is what the called list for %s looked like: %s' % (caller, x))
+                                if x:
+                                    print("Couldn't remove %s from the called list for %s." % (func, caller))
+                                    print('Here is what the called list for %s looked like: %s' % (caller, x))
             del self.by_callee[func]
             #print('deleting %s from self.by_callee; after len = %d' % (func, len(self.by_callee)))
         else:
