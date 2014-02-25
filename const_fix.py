@@ -1,6 +1,7 @@
 import os, sys, re, weakref
 import callgraph
 
+outcomes_log = 'const-outcomes.txt'
 compile_log = '/tmp/make.log'
 compile_cmd = 'make -j6 >%s 2>&1' % compile_log
 compile_tests_cmd = 'scons -n -j6 >%s 2>&1' % compile_log
@@ -15,6 +16,17 @@ const_prefix_pat = re.compile('^const ([a-zA-Z0-9_]+)(.*)$')
 const_suffix_pat = re.compile('([a-zA-Z0-9_]+)\s+const.*')
 array_spec_pat = re.compile('.*(\[^]]\])$')
 prototype_pat_template = r'^\s*((?:[_a-zA-Z][_a-zA-Z0-9:]*)[^-()=+!<>/|^]*?(?:\s+|\*|\?))(%s)\s*\(([^()]*?)\)(\s*const)?\s*([{;])'
+
+# Matches lines like this: mock((void *)0, void *, __MRMQueryThread,(void *Args))
+old_mock_proto_pat_template = r'^\s*mock\s*\((.*?),\s*(.*?),\s*(%s)\s*,\s*\((.*?)\)\)\s*$'
+
+# Matches lines like this: MOCK_CMETHOD4(int, MGEventItemIterate, mgevent_list_t *, char **, mgevent_obj_t **, mgevent_iter_t *);
+new_mock_cproto_pat_template = r'^\s*MOCK_CMETHOD\d\s*\(\s*(.*?)\s*,\s*(%s)\s*,\s*(.*?)\)\s*;\s*$'
+
+# Matches lines like this: MOCK_METHOD4(MGEventItemIterate, int(mgevent_list_t *, char **, mgevent_obj_t **, mgevent_iter_t *));
+new_mock_cppproto_pat_template = r'^\s*MOCK_METHOD\d\s*\(\s*(%s)\s*,\s*([^(]+)\((.*?)\)\s*\)\s*;\s*$'
+
+test_proto_pats = [old_mock_proto_pat_template, new_mock_cppproto_pat_template, new_mock_cproto_pat_template]
 
 def run(cmd):
     print('  ' + cmd)
@@ -68,14 +80,14 @@ def split_params(param_list):
     
 def cut_cpp_comments(txt):
     '''remove c++-style comments from a block of text'''
-    args = param_list.split('\n')
+    args = txt.split('\n')
     for n in xrange(len(args)):
         arg = args[n]
         k = arg.find('//')
         if k > -1:
             arg = arg[0:k]
             args[n] = arg
-    return args.join('\n')
+    return '\n'.join(args)
 
 def find_end_of_body(txt, first_body_idx):
     '''find the curly brace that ends the body of a function'''
@@ -96,11 +108,41 @@ class Param:
         self.array_spec = None
         self.data_type = None
         self.name = None
-        self._parse(decl)
+        self._parse()
     def is_const_candidate(self):
-        return self.data_type.find['*'] > -1 or self.data_type.find['&'] > -1
+        dt = self.data_type
+        i = dt.find('*')
+        j = dt.find('&')
+        # Params that are not pointers or references are passed by value,
+        # so their constness is irrelevant.
+        if i == -1 and j == -1:
+            return False
+        # Params that are *& are virtually guaranteed to be OUT params,
+        # so their constness should not be adjusted.
+        if i > -1 and j > -1:
+            return False
+        # Same for **.
+        if i > -1 and i < dt.rfind('*'): 
+            return False
+        return True
     def is_const(self):
-        return 
+        return 'const' in self.decl
+    def get_pivot_point(self):
+        i = self.data_type.find('*')
+        j = self.data_type.find('&')
+        if i > -1:
+            if j > -1:
+                return min(i, j)
+            return i
+        elif j > -1:
+            return j
+    def set_const(self, value):
+        i = self.get_pivot_point()
+        if value:
+            if not self.is_const():
+                self.data_type = self.data_type[:i].rstrip() + ' const ' + self.data_type[i:]
+        elif self.is_const():
+            self.data_type = re.sub(r'\s{2,}', ' ', self.data_type.replace('const', ''))            
     def _parse(self):
         decl = squeeze(self.decl)
         m = array_spec_pat.match(decl)
@@ -122,21 +164,27 @@ class Param:
         else:
             self.data_type = decl
         self.data_type = normalize_type(self.data_type)
+    def __str__(self):
+        if self.name:
+            return self.data_type + ' ' + self.name + self.array_spec
+        elif self.array_spec:
+            return self.data_type + self.array_spec
+        else:
+            return self.data_type
 
 class Prototype:
     def __init__(self, fpath, txt, match):
         self.fpath = fpath
         self.txt = txt
         self.match = match
-        self.original = self.txt[self.match.start():self.match.end()]
+        self.original = self.txt[self.match.start():self.match.end() - 1]
         self.body = None
-        self.return_type = match.group(1)
-        if match.group(4) == '{':
-            self.body = find_end_of_body(txt, match.end(4))
+        self.return_type = match.group(1).strip()
+        if match.group(5) == '{':
+            self.body = find_end_of_body(txt, match.end(5))
+            self.original = self.original.rtrim()
         # Find boundaries of param list
-        i = txt.find('(', match.end(1)) + 1
-        j = txt.rfind(')', match.end())
-        param_list = txt[i:j]
+        param_list = match.group(3)
         # Remove comments that might confuse us.
         param_list = comment_pat.sub('', param_list)
         param_list = cut_cpp_comments(param_list)
@@ -146,7 +194,7 @@ class Prototype:
         # of their own...
         self.params = split_params(param_list)
     def get_ideal(self):
-        return '%s %s %s' % (self.return_type, self.match.group(2), self.match.group(3))
+        return '%s %s(%s)' % (self.return_type, self.match.group(2), ', '.join([str(p) for p in self.params]))
     def is_in_tests(self):
         return 'test/' in self.fpath
     def is_in_header(self):
@@ -171,6 +219,7 @@ class Prototype:
         return True
 
 def update_param_names(prototypes):
+    return False
     if len(prototypes) < 2:
         return False
     best = []
@@ -222,29 +271,51 @@ def update_param_names(prototypes):
                 overwrite_file(proto.fpath, txt)
     return changed_count > 0
                 
-def backup_file(fpath):
-    for i in xrange(1, 1000):
-        bkpath = fpath + '.' + str(i)
-        if not os.path.isfile(bkpath):
-            break
-    assert(bkpath < 1000)
+def _name_to_backup_name(fname):
+    assert not fname.startswith('.')
+    return '.' + fname + '.bak'
+
+def _backup_name_to_name(fname):
+    assert fname.startswith('.')
+    return fname[1:].replace('.bak', '')
+
+def _backup_or_restore_file(fpath, name_func):
+    folder, fname = os.path.split(fpath)
+    new_name = os.path.join(folder, name_func(fname))
     with open(fpath, 'r') as f:
-        txt = f1.read()
-    with open(bkpath, 'w') as f:
+        txt = f.read()
+    if os.path.isfile(new_name):
+        os.remove(new_name)
+    with open(new_name, 'w') as f:
         f.write(txt)
-    return bkpath, txt
+        
+def backup_file(fpath):
+    _backup_or_restore_file(fpath, _name_to_backup_name)
+    
+def restore_file(fpath):
+    folder, fname = os.path.split(fpath)
+    fpath = os.path.join(folder, _name_to_backup_name(fname))
+    _backup_or_restore_file(fpath, _backup_name_to_name)
 
 def find_prototypes_in_file(func, fpath):
     with open(fpath, 'r') as f:
         txt = f.read()
+    i = func.find('(')
+    if i > -1:
+        func = func[:i]
     # Do quick sanity check first.
     i = txt.find(func)
     if i == -1:
         return
-    expr = re.compile(prototype_pat_template % func)
+    expr = re.compile(prototype_pat_template % func, re.MULTILINE)
     protos = []
     for m in expr.finditer(txt):
         protos.append(Prototype(fpath, txt, m))
+    if '/test/' in fpath:
+        test_pats = [re.compile(pat % func, re.DOTALL | re.MULTILINE) for pat in test_proto_pats]
+        for pat in test_pats:
+            for m in pat.finditer(txt):
+                protos.append(Prototype(fpath, txt, m))
     return protos
 
 def find_prototypes_in_codebase(func, root, files=None):
@@ -263,6 +334,8 @@ def find_prototypes_in_codebase(func, root, files=None):
                     in_this_file = find_prototypes_in_file(func, fpath)
                     if in_this_file:
                         prototypes[fpath] = in_this_file
+    if prototypes:
+        print('found %d prototypes for %s' % (len(prototypes), func))
     return prototypes
 
 def tests_pass(root):
@@ -304,19 +377,67 @@ def compile_is_clean(root):
     finally:
         os.chdir(oldcwd) 
 
-def find_impl(prototypes):
-    if len(prototypes) == 1:
-        return prototypes[0]
-    for p in prototypes:
-        if p.body and p.is_in_impl() and not p.is_in_tests():
+def find_best_prototype(prototypes):
+    '''
+    Given a dict of file path --> list of prototypes in that file, find the best
+    prototype to use as a starting point for modification.
+    '''
+    # By preference, choose a prototype that's in a .c, has a body (instead of being
+    # a declaration only), and that isn't in our tests. This gives us the best chance
+    # of starting from a prototype that has named parameters. A second best alternative
+    # would be a declaration in a non-test .c file.
+    second_best = None
+    for fpath, protos in prototypes.iteritems():
+        if fpath.endswith('*.c') and 'test/' not in fpath:
+            for p in protos:
+                if p.body:
+                    return p
+                else:
+                    second_best = p
+    if second_best:
+        return second_best
+    # Failing that, look for a prototype in a header, but not in tests. In case the
+    # function is declared multiple times in headers, pick the version that has an
+    # inline impl by preference.
+    for fpath, protos in prototypes.iteritems():
+        if fpath.endswith('*.h') and 'test/' not in fpath:
+            for p in protos:
+                if p.body:
+                    return p
+                else:
+                    second_best = p
+    if second_best:
+        return second_best
+    # Failing that, pick the first prototype.
+    for protos in prototypes.values():
+        for p in protos:
             return p
-    for p in prototypes:
-        if p.body and not p.is_in_tests():
-            return p
-    for p in prototypes:
-        if not p.is_in_tests():
-            return p
-    return p[0]                
+        
+def rewrite_prototypes(prototypes, param_idx, param):
+    for fpath in prototypes:
+        backup_file(fpath)
+        with open(fpath, 'r') as f:
+            txt = f.read()
+        offsets = [p.match.start() for p in prototypes[fpath]]
+        i = 0
+        for p in prototypes[fpath]:
+            p.params[param_idx].data_type = param.data_type
+            old_len = len(p.original)
+            new_prototype = p.get_ideal()
+            new_len = len(new_prototype)
+            txt = txt[0:offsets[i]] + new_prototype + txt[offsets[i] + old_len:]
+            delta_len = new_len - old_len
+            if delta_len:
+                for j in xrange(i + 1, len(offsets)):
+                    offsets[j] += delta_len
+            i += 1
+        with open(fpath, 'w') as f:
+            f.write(txt)
+            
+def _pluralize(noun, count):
+    if count == 1:
+        return nount
+    return noun + 's'
 
 def fix_func(func, root, cg):
     # Locate every place where this function's prototype appears.
@@ -332,7 +453,7 @@ def fix_func(func, root, cg):
     # look like this:
     #
     #   int do_something(mjob_t * job, char * buf, int size, int level, void * state);
-    if update_param_names(prototypes):
+    if len(prototypes) > 1 and update_param_names(prototypes):
         if not compile_is_clean():
             revert()
         else:
@@ -341,43 +462,60 @@ def fix_func(func, root, cg):
             for p in prototypes:
                 x[p.fpath] = 1
             prototypes = find_prototypes_in_codebase(func, root, x.keys())
+            
     # Find the version of the prototype that's associated with the main implementation
     # of the function (not the one in scaffolding.c).
-    impl = find_impl(prototypes)
+    impl = find_best_prototype(prototypes)
+    
     if impl.is_const_candidate():
+        change_count = 0
         print('Checking %s.' % impl.get_ideal())
+        param_idx = 0
         for param in impl.params:
-            recompile = False
+            original_state = None
             if param.is_const_candidate():
                 if not param.is_const():
-                    recompile = True                    
+                    original_state = False
+                    param.set_const(True)
             elif param.is_const():
-                recompile = True
-                remove_const(param)
-            else:
-                recompile = False
+                original_state = True
+                param.set_const(False)
+            if original_state is not None:
+                rewrite_prototypes(prototypes, param_idx, param)
+                if not compile_is_clean(root) or not tests_pass(root):
+                    print("%s doesn't work; backing out change." % impl.get_ideal())
+                    param.set_const(False)
+                    for fpath in prototypes:
+                        restore_file(fpath)
+                    if not compile_is_clean(root) or not tests_pass(root):
+                        print('Unable to get back to a clean state; exiting prematurely.')
+                        sys.exit(1)
+                else:
+                    print("%s works; keeping change." % impl.get_ideal())
+                    change_count += 1
+            param_idx += 1
+        print('%d %s made.' % (change_count, _pluralize('change', change_count)))
+        tags = str(change_count)
+        if change_count:
+            tags += ' --> ' + impl.get_ideal()
+        tabulate(impl.name, tags)
                 
-IRRELEVANT_FUNC = 0
+CONST_IRRELEVANT = 0
 CONST_MATTERS = 1
 OBNOXIOUS_CONST = 2
+classify_labels = ['CONST_IRRELEVANT', 'CONST_MATTERS', 'OBNOXIOUS_CONST']
 
 def _classify_func(params):
-    cls = IRRELEVANT_FUNC
+    cls = CONST_IRRELEVANT
     if params:
         for p in params:
             if ('*' in p or '&' in p) and ('const' not in p):
                 return CONST_MATTERS
             elif 'const' in p:
                 cls = OBNOXIOUS_CONST
-    return cls            
-                
-def fix_prototypes(root):
-    print('')
-    root = os.path.normpath(os.path.abspath(root))
-    if not os.path.isfile(os.path.join(root, 'Makefile')):
-        sys.stderr.write('Did not find Makefile at root of codebase %s.\n' % root)
-        return 1
-    
+    return cls
+
+def verify_clean():
     ok = True
     if False:
         print('Verifying that codebase is clean before we start...\n')
@@ -387,18 +525,64 @@ def fix_prototypes(root):
             ok = False
         if not ok:
             sys.stderr.write('Prototype fixup in %s aborted.\n' % root)
-            return 1
+            sys.exit(1)
     else:
         print('Skipping initial verification; please re-enable later in script.')
+        
+def verify_makefile(root):
+    if not os.path.isfile(os.path.join(root, 'Makefile')):
+        sys.stderr.write('Did not find Makefile at root of codebase %s.\n' % root)
+        sys.exit(1)
+        
+def cut_noise(cg):
+    print('Eliminating functions where const issues are irrelevant...')
+    cuttable = []
+    for func in cg.by_caller:
+        params = cg.get_params(func)
+        cls = _classify_func(params)
+        if cls == CONST_IRRELEVANT:
+            cuttable.append(func)
+    with open(outcomes_log, 'a') as f:
+        lbl = classify_labels[CONST_IRRELEVANT]
+        for func in cuttable:
+            f.write('%s\t%s\n' % (func, lbl))
+            cg.remove(func)
+    print('Reduced function count from %d to %d.' % (len(cg.by_caller) + len(cuttable), len(cg.by_caller)))
+    
+def prune(cg):
+    to_prune = []
+    for func in cg.by_caller:
+        params = cg.get_params(func)
+        cls = _classify_func(params)
+        if cls != CONST_MATTERS:
+            tabulate(func, classify_labels[cls])
+            to_prune.append(func)
+    print('pruning %d items: %s' % (len(to_prune), to_prune))
+    for item in to_prune:
+        cg.remove(item)
+        
+def tabulate(func, tags):
+    if not hasattr(tags, 'upper'):
+        tags = str(tags)[1:-1].replace(',', '')
+    with open(outcomes_log, 'a') as f:
+        f.write('%s\t%s\n' % (func, tags))
+
+def fix_prototypes(root):
+    print('')    
+    root = os.path.normpath(os.path.abspath(root))
+    verify_makefile(root)
+    verify_clean()
     
     print('Loading call graph...')
-    pass_number = 0
-    cg = callgraph.Callgraph(root)
+    cg = callgraph.Callgraph(root)    
+    cut_noise(cg)
+        
     tried_to_prune = False
+    pass_number = 0
     while not cg.is_empty():
         pass_number += 1
         leaves = cg.get_leaves()
-        print('\nPass %d: %d leaves out of %d functions...\n' % (pass_number, len(leaves), len(cg.by_callee)))
+        print('\nPass %d: %d leaves out of %d functions ----------------\n' % (pass_number, len(leaves), len(cg.by_callee)))
         if len(leaves) == 0:
             # See if we can prune some stuff away by finding functions where const doesn't matter.
             if tried_to_prune:
@@ -406,17 +590,7 @@ def fix_prototypes(root):
                 sys.exit(1)
             else:
                 tried_to_prune = True
-                to_prune = []
-                for func in cg.by_caller:
-                    params = None
-                    if func in cg.params_by_caller:
-                        params = cg.params_by_caller[func]
-                    cls = _classify_func(params)
-                    if cls != CONST_MATTERS:
-                        to_prune.append(func)
-                print('pruning %d items: %s' % (len(to_prune), to_prune))
-                for item in to_prune:
-                    cg.remove(item)
+                prune(cg)
                 continue
         else:
             tried_to_prune = False
@@ -427,14 +601,13 @@ def fix_prototypes(root):
             if not callers:
                 print('%s appears to be an orphan, never called.' % func)
             else:
-                print('%s called by %s' % (func, callers))
-            params = None
-            if func in cg.params_by_caller:
-                params = cg.params_by_caller[func]
+                pass #print('%s called by %s' % (func, callers))
+            params = cg.get_params(func)
             cls = _classify_func(params)
             if cls == CONST_MATTERS:
-                print('fixing %s' % func)
-                #fix_func(func, root, cg)
+                print('Experimenting with changes to %s...' % func)
+                fix_func(func, root, cg)
+                sys.exit(0)
             elif cls == OBNOXIOUS_CONST:
                 print('%s should not use const, but does.' % func)
             else:
