@@ -1,7 +1,7 @@
 import os, sys, re, weakref
 
 import callgraph
-from prototype import Prototype
+from prototype import *
 from safechange import *
 
 outcomes_log = 'const-outcomes.txt'
@@ -12,23 +12,8 @@ make_clean_cmd = 'make clean >/dev/null 2>&1'
 clean_tests_cmd = 'scons -c'
 test_log = '/tmp/test.log'
 test_cmd = 'scons -j6 >%s 2>&1' % test_log
-datatype_names = 'int|short|long|double|float|char|bool'.split('|')
-moab_type_pat = re.compile('.*\Wm[a-z_0-9]+_t$')
-const_suffix_pat = re.compile('([a-zA-Z0-9_]+)\s+const.*')
-array_spec_pat = re.compile('.*(\[^]]\])$')
-prototype_pat_template = r'^[ \t]*((?:[_a-zA-Z][_a-zA-Z0-9:]*)[^-;()=+!<>/|^]*?(?:\s+|\*|\?))(%s)\s*\(([^()]*?)\)(\s*const)?\s*([{;])'
+
 const_error_pat_template = r'In function [^(]+ %s\s*\(.*?error: assignment of member ‘[^‘]+’ in read-only object'
-
-# Matches lines like this: mock((void *)0, void *, __MRMQueryThread,(void *Args))
-old_mock_proto_pat_template = r'^\s*mock\s*\((.*?),\s*(.*?),\s*(%s)\s*,\s*\((.*?)\)\)\s*$'
-
-# Matches lines like this: MOCK_CMETHOD4(int, MGEventItemIterate, mgevent_list_t *, char **, mgevent_obj_t **, mgevent_iter_t *);
-new_mock_cproto_pat_template = r'^\s*MOCK_CMETHOD\d\s*\(\s*(.*?)\s*,\s*(%s)\s*,\s*(.*?)\)\s*;\s*$'
-
-# Matches lines like this: MOCK_METHOD4(MGEventItemIterate, int(mgevent_list_t *, char **, mgevent_obj_t **, mgevent_iter_t *));
-new_mock_cppproto_pat_template = r'^\s*MOCK_METHOD\d\s*\(\s*(%s)\s*,\s*([^(]+)\((.*?)\)\s*\)\s*;\s*$'
-
-test_proto_pats = [old_mock_proto_pat_template, new_mock_cppproto_pat_template, new_mock_cproto_pat_template]
 
 def run(cmd):
     print('  ' + cmd)
@@ -52,43 +37,46 @@ def improve_param_names(root, prototypes):
     # Figure out which version of this parameter, across all prototypes,
     # has the longest name. We're going to assume that the longest name
     # is the best one. Not 100% true, I know, but a good approximation.
-    for fpath in prototypes:
-        if 'test/' not in fpath:
-            prototypes_in_this_file = prototypes[fpath]
-            if not best:
-                best = ['' for i in xrange(len(prototypes_in_this_file[0].params))]
-            for proto in prototypes_in_this_file:
-                i = 0
-                for param in proto.params:
-                    if param.name:
-                        if best[i]:
-                            if len(best[i]) < len(param.name):
-                                best[i] = param.name
-                        else:
-                            best[i] = param.name
-                    i += 1
+    for fpath in prototypes.non_test_fpaths():
+        prototypes_in_this_file = prototypes[fpath]
+        if not best:
+            best = ['' for i in xrange(len(prototypes_in_this_file[0].params))]
+        for proto in prototypes_in_this_file:
+            i = 0
+            for param in proto.params:
+                if param.name:
+                    current = param.name
+                    # Moab has a nagging problem where params go by single-letter
+                    # names. For jobs that are named J, this isn't that terrible--but
+                    # for reservations, RMs, resources, and reqs, this is really
+                    # unfortunate. Same for partitions and policies. Therefore,
+                    # propose better names if no existing ones are useful.
+                    if len(current) < 2 and len(best[i]) < 2:
+                        current = param.propose_name()
+                    if best[i]:
+                        if len(best[i]) < len(current):
+                            best[i] = current
+                    else:
+                        best[i] = current
+                i += 1
     
     # On off chance that we have a func that's only in the test folder...
     if not best:
         return False
 
     # Now see which prototypes need to be updated to reflect the best names.
-    func_name = None
     change_count = 0
-    for fpath in prototypes:
-        if 'test/' not in fpath:
-            for proto in prototypes[fpath]:
-                if func_name is None:
-                    func_name = proto.name
-                proto.dirty = False
-                i = 0
-                for param in proto.params:
-                    if param.name != best[i]:
-                        param.new_name = best[i]
-                        proto.dirty = True
-                    i += 1
-                if proto.dirty:
-                    change_count += 1
+    for fpath in prototypes.non_test_fpaths():
+        for proto in prototypes[fpath]:
+            proto.dirty = False
+            i = 0
+            for param in proto.params:
+                if param.name != best[i]:
+                    param.new_name = best[i]
+                    proto.dirty = True
+                i += 1
+            if proto.dirty:
+                change_count += 1
     
     if change_count:
         print("  Rewriting prototypes to include better param names.")
@@ -96,52 +84,14 @@ def improve_param_names(root, prototypes):
         # changes could fail is that a parameter isn't used, so adding a name for
         # it causes a warning.
         rewrite_prototypes(prototypes)
-        if prove_safe_change(root, param_name_rollback(prototypes), func_name):
+        if prove_safe_change(root, param_name_rollback(prototypes), prototypes.function_name):
+            for proto in prototypes.non_test_prototypes():
+                for param in proto.params:
+                    param.name = param.new_name
             return True
         
     return False
                 
-def find_prototypes_in_file(func, fpath):
-    with open(fpath, 'r') as f:
-        txt = f.read()
-    i = func.find('(')
-    if i > -1:
-        func = func[:i]
-    # Do quick sanity check first.
-    i = txt.find(func)
-    if i == -1:
-        return
-    expr = re.compile(prototype_pat_template % func, re.MULTILINE)
-    protos = []
-    for m in expr.finditer(txt):
-        protos.append(Prototype(fpath, txt, m))
-    if '/test/' in fpath:
-        test_pats = [re.compile(pat % func, re.DOTALL | re.MULTILINE) for pat in test_proto_pats]
-        for pat in test_pats:
-            for m in pat.finditer(txt):
-                protos.append(Prototype(fpath, txt, m))
-    return protos
-
-def find_prototypes_in_codebase(func, root, files=None):
-    prototypes = {}
-    if files:
-        for f in files:
-            prototypes[fpath] = find_prototypes_in_file(f)
-    else:
-        for root, dirs, files in os.walk(root):
-            skip = [d for d in dirs if d.startswith('.')]
-            for d in skip:
-                dirs.remove(d)
-            for f in files:
-                if (not f.startswith('.')) and (f.endswith('.h') or f.endswith('.c')):
-                    fpath = os.path.join(root, f)
-                    in_this_file = find_prototypes_in_file(func, fpath)
-                    if in_this_file:
-                        prototypes[fpath] = in_this_file
-    if prototypes:
-        print('  Found %d %s.' % (len(prototypes), _pluralize('prototype', len(prototypes))))
-    return prototypes
-
 def tests_pass(root):
     print('Testing...')
     oldcwd = os.getcwd()
@@ -198,42 +148,6 @@ def compile_is_clean(root, changed_func=None):
     finally:
         os.chdir(oldcwd) 
 
-def find_best_prototype(prototypes):
-    '''
-    Given a dict of file path --> list of prototypes in that file, find the best
-    prototype to use as a starting point for modification.
-    '''
-    # By preference, choose a prototype that's in a .c, has a body (instead of being
-    # a declaration only), and that isn't in our tests. This gives us the best chance
-    # of starting from a prototype that has named parameters. A second best alternative
-    # would be a declaration in a non-test .c file.
-    second_best = None
-    for fpath, protos in prototypes.iteritems():
-        if fpath.endswith('*.c') and 'test/' not in fpath:
-            for p in protos:
-                if p.body:
-                    return p
-                else:
-                    second_best = p
-    if second_best:
-        return second_best
-    # Failing that, look for a prototype in a header, but not in tests. In case the
-    # function is declared multiple times in headers, pick the version that has an
-    # inline impl by preference.
-    for fpath, protos in prototypes.iteritems():
-        if fpath.endswith('*.h') and 'test/' not in fpath:
-            for p in protos:
-                if p.body:
-                    return p
-                else:
-                    second_best = p
-    if second_best:
-        return second_best
-    # Failing that, pick the first prototype.
-    for protos in prototypes.values():
-        for p in protos:
-            return p
-        
 def rewrite_prototypes(prototypes):
     for fpath in prototypes:
         file_is_dirty = False
@@ -245,20 +159,27 @@ def rewrite_prototypes(prototypes):
             backup_file(fpath)
             with open(fpath, 'r') as f:
                 txt = f.read()
-            offsets = [p.match.start() for p in prototypes[fpath]]
             i = 0
-            for p in prototypes[fpath]:
-                old_len = len(p.original)
-                new_prototype = p.get_ideal()
-                new_len = len(new_prototype)
-                txt = txt[0:offsets[i]] + new_prototype + txt[offsets[i] + old_len:]
-                delta_len = new_len - old_len
-                if delta_len:
-                    for j in xrange(i + 1, len(offsets)):
-                        offsets[j] += delta_len
-                i += 1
+            new_txt = ''
+            new_names = []
+            for proto in prototypes[fpath]:
+                for param in proto.params:
+                    if proto.start_of_body and param.new_name and param.new_name != param.name:
+                        new_names.append(re.compile(r'(\W)%s(\W)' % param.name))
+                        new_names.append(re.compile(r'\1%s\2' % param.new_name))
+                    new_txt += txt[i:param.begin]
+                    new_txt += str(param)
+                    i = param.begin + len(param.decl)
+            if new_names:
+                new_txt += txt[i:proto.start_of_body]
+                body = txt[proto.start_of_body:proto.end_of_body]
+                for j in xrange(len(new_names)):
+                    body = new_names[j].sub(new_names[j + 1], body)
+                new_txt += body
+                i = proto.end_of_body
+            new_txt += txt[i:]
             with open(fpath, 'w') as f:
-                f.write(txt)
+                f.write(new_txt)
             
 def _pluralize(noun, count):
     if count == 1:
@@ -288,7 +209,7 @@ def fix_func(func, root, cg, tags):
             
     # Find the version of the prototype that's associated with the main implementation
     # of the function (not the one in test scaffolding).
-    impl = find_best_prototype(prototypes)
+    impl = prototypes.find_best()
     
     if impl.is_const_candidate():
         change_count = 0
@@ -297,8 +218,11 @@ def fix_func(func, root, cg, tags):
             original_state = None
             if param.is_const_candidate():
                 if not param.is_const():
-                    original_state = False
-                    param.set_const(True)
+                    if impl.prove_param_cant_be_const(param_idx):
+                        pass
+                    else:
+                        original_state = False
+                        param.set_const(True)
             elif param.is_const():
                 original_state = True
                 param.set_const(False)
@@ -308,7 +232,7 @@ def fix_func(func, root, cg, tags):
                         proto.params[param_idx].data_type = param.data_type
                         proto.dirty = True
                 rewrite_prototypes(prototypes)
-                if prove_safe_change(root, const_rollback(param, prototypes, param_idx), impl.name):
+                if prove_safe_change(root, const_rollback(param, prototypes, param_idx, original_state), impl.name):
                     change_count += 1
             param_idx += 1
         print('%d %s made.' % (change_count, _pluralize('change', change_count)))

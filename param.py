@@ -1,7 +1,39 @@
 import re
 
+array_spec_pat = re.compile('.*(\[^]]\])$')
 const_prefix_pat = re.compile('^const ([a-zA-Z0-9_]+)(.*)$')
-   
+moab_type_pat = re.compile('.*\Wm[a-z_0-9]+_t$')
+datatype_names = 'int|short|long|double|float|char|bool'.split('|')
+moab_struct_naming_pat = re.compile(r'm([a-z_]+)_t(?=$|\W)')
+
+splittable = [
+    'table',
+    'info',
+    'mdata',
+    'data',
+    'grp',
+    'req',
+    'vm',
+    'grid',
+    'stats',
+    'list',
+    'array',
+    'node'
+]   
+
+abbreviatable = {
+    'request': 'req',
+    'response': 'resp',
+    'constraint': 'cons',
+    'policy': 'pol',
+    'partition': 'par',
+    'group': 'grp',
+    'threadpool': 'thpool',
+    'trigger': 'trig',
+    'resource': 'res',
+    'reservation': 'rsv',
+}
+    
 def _squeeze(txt):
     '''Replace all runs of whitepace with a single space, and trim front and back.'''
     txt = txt.strip().replace('\r', ' ').replace('\n', ' ').replace('\t', ' ')
@@ -32,6 +64,36 @@ class Param:
         self.name = None
         self.new_name = None
         self._parse()
+        
+    def propose_name(self):
+        m = moab_struct_naming_pat.match(self.data_type)
+        if m:
+            base = m.group(1)
+            '''
+            r -> rm, resource, rsv, req
+            p -> policy, partition
+            '''
+            for key in abbreviatable:
+                if base.endswith(key):
+                    base = base[0:len(base) - len(key)] + '_' + abbreviatable[key]
+                    break
+            for x in splittable:
+                if base.endswith(x):
+                    i = len(base) - len(x)
+                    if base[i - 1] != '_':
+                        base = base[0:i] + '_' + base[i:]
+            cap_next = False
+            proposed = ''
+            for c in base:
+                if c == '_':
+                    cap_next = True
+                else:
+                    if cap_next:
+                        proposed += c.upper()
+                        cap_next = False
+                    else:
+                        proposed = c
+            return proposed
 
     def is_const_candidate(self):
         dt = self.data_type
@@ -62,7 +124,7 @@ class Param:
             return i
         elif j > -1:
             return j
-
+        
     def set_const(self, value):
         i = self.get_pivot_point()
         if value:
@@ -72,7 +134,7 @@ class Param:
             self.data_type = re.sub(r'\s{2,}', ' ', self.data_type.replace('const', ''))            
 
     def _parse(self):
-        decl = squeeze(self.decl)
+        decl = _squeeze(self.decl)
         m = array_spec_pat.match(decl)
         if m:
             self.array_spec = m.group(1).replace(' ', '')
@@ -95,12 +157,10 @@ class Param:
         self.data_type = normalize_type(self.data_type)
 
     def __str__(self):
-        if self.new_name:
-            return self.data_type + ' ' + self.new_name + self.array_spec
-        if self.name:
-            return self.data_type + ' ' + self.name + self.array_spec
-        elif self.array_spec:
-            return self.data_type + self.array_spec
-        else:
-            return self.data_type
+        name = self.new_name
+        if not name:
+            name = self.name
+        if name:
+            return self.data_type + ' ' + name + self.array_spec
+        return self.data_type + self.array_spec
 

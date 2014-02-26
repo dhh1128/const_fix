@@ -1,6 +1,23 @@
-import sys, re
+import os, sys, re
 
 from param import Param
+
+_prototype_pat_template = r'^[ \t]*((?:[_a-zA-Z][_a-zA-Z0-9:]*)[^-;{}()=+!<>/|^]*?(?:\s+|\*|\?))(%s)\s*\(([^()]*?)\)(\s*const)?\s*([{;])'
+# Matches lines like this: mock((void *)0, void *, __MRMQueryThread,(void *Args))
+_old_mock_proto_pat_template = r'^\s*mock\s*\((.*?),\s*(.*?),\s*(%s)\s*,\s*\((.*?)\)\)\s*$'
+
+# Matches lines like this: MOCK_CMETHOD4(int, MGEventItemIterate, mgevent_list_t *, char **, mgevent_obj_t **, mgevent_iter_t *);
+_new_mock_cproto_pat_template = r'^\s*MOCK_CMETHOD\d\s*\(\s*(.*?)\s*,\s*(%s)\s*,\s*(.*?)\)\s*;\s*$'
+
+# Matches lines like this: MOCK_METHOD4(MGEventItemIterate, int(mgevent_list_t *, char **, mgevent_obj_t **, mgevent_iter_t *));
+_new_mock_cppproto_pat_template = r'^\s*MOCK_METHOD\d\s*\(\s*(%s)\s*,\s*([^(]+)\((.*?)\)\s*\)\s*;\s*$'
+
+test_proto_pats = [_old_mock_proto_pat_template, _new_mock_cppproto_pat_template, _new_mock_cproto_pat_template]
+
+def _pluralize(noun, count):
+    if count == 1:
+        return noun
+    return noun + 's'
 
 def _split_params(txt, i, end):
     '''
@@ -67,7 +84,7 @@ def _split_params(txt, i, end):
                         begin = None
                         cut_position = None
                 else:
-                    if begin is None:
+                    if begin is None and (c.isalpha() or c == '_'):
                         begin = i
                 i += 1
                 if i == end:
@@ -81,16 +98,33 @@ def _split_params(txt, i, end):
     
 def _find_end_of_body(txt, first_body_idx):
     '''find the curly brace that ends the body of a function'''
+    in_quote = False
     curly_count = 1
-    for i in xrange(first_body_idx, len(txt)):
+    end = len(txt)
+    i = first_body_idx
+    while i < end:
         c = txt[i]
-        if c == '{':
-            curly_count += 1
-        elif c == '}':
-            curly_count -= 1
-            if curly_count == 0:
-                return i
-    sys.stderr.write('Could not find end of function.')
+        if in_quote:
+            if c == '\\':
+                i += 1
+            elif c == '"':
+                in_quote = False
+        else:
+            if c == '{':
+                curly_count += 1
+            elif c == '}':
+                curly_count -= 1
+                if curly_count == 0:
+                    return i
+            elif c == '/':
+                if txt[i + 1] == '*':
+                    i = txt.find('*/', i + 2) + 1
+                elif txt[i + 1] == '/':
+                    i = txt.find('\n')
+            elif c == '"':
+                in_quote = True
+        i += 1
+    assert(False)
     
 class Prototype:
     def __init__(self, fpath, txt, match):
@@ -103,10 +137,12 @@ class Prototype:
                 break
         self.indent = x[0:i]
         self.original = x[i:]
-        self.body = None
+        self.start_of_body = None
+        self.end_of_body = None
         self.return_type = match.group(1).strip()
         if match.group(5) == '{':
-            self.body = _find_end_of_body(txt, match.end(5))
+            self.start_of_body = match.end(5)
+            self.end_of_body = _find_end_of_body(txt, self.start_of_body)
             self.original = self.original.rstrip()
         self.params = _split_params(txt, match.start(3), match.end(3))
         
@@ -143,16 +179,123 @@ class Prototype:
         else:
             return False
         return True
+    
+    def prove_param_cant_be_const(self, param_idx):
+        if self.start_of_body:
+            if len(self.params) > param_idx:
+                param = self.params[param_idx]
+                name = param.new_name
+                if not name:
+                    name = param.name
+                if name:
+                    i = param.get_pivot_point()
+                    if i > -1:
+                        pivot = param.data_type[i]
+                        if pivot == '*':
+                            operator = '->'
+                        else:
+                            assert pivot == '&'
+                            operator = r'\.'
+                        pat = re.compile(r'[^a-zA-Z0-9_]%s%s[a-zA-Z0-9_]+\s*(\+[+=]|-[-=]|=(?!=))' % (name, operator))
+                        if pat.search(self.txt, self.start_of_body, self.end_of_body):
+                            return True
+                        if pivot == '*':
+                            pat = re.compile(r'\*%s\s*(\+[+=]|-[-=]|=(?!=))' % name)
+                            if pat.search(self.txt, self.start_of_body, self.end_of_body):
+                                return True
+        return False
+    
+def find_prototypes_in_file(func, fpath):
+    with open(fpath, 'r') as f:
+        txt = f.read()
+    i = func.find('(')
+    if i > -1:
+        func = func[:i]
+    # Do quick sanity check first.
+    i = txt.find(func)
+    if i == -1:
+        return
+    expr = re.compile(_prototype_pat_template % func, re.MULTILINE)
+    protos = []
+    for m in expr.finditer(txt):
+        protos.append(Prototype(fpath, txt, m))
+    if 'test/' in fpath:
+        test_pats = [re.compile(pat % func, re.DOTALL | re.MULTILINE) for pat in test_proto_pats]
+        for pat in test_pats:
+            for m in pat.finditer(txt):
+                protos.append(Prototype(fpath, txt, m))
+    return protos
 
-class AllPrototypes(dict):
+def find_prototypes_in_codebase(func, root, files=None):
+    prototypes = PrototypeMap()
+    if files:
+        for f in files:
+            prototypes[fpath] = find_prototypes_in_file(f)
+    else:
+        for root, dirs, files in os.walk(root):
+            skip = [d for d in dirs if d.startswith('.')]
+            for d in skip:
+                dirs.remove(d)
+            for f in files:
+                if (not f.startswith('.')) and (f.endswith('.h') or f.endswith('.c')):
+                    fpath = os.path.join(root, f)
+                    in_this_file = find_prototypes_in_file(func, fpath)
+                    if in_this_file:
+                        prototypes[fpath] = in_this_file
+    if prototypes:
+        count = len(prototypes)
+        print('  Found %d %s.' % (count, _pluralize('prototype', count)))
+    return prototypes
+
+class PrototypeMap(dict):
     @property
     def function_name(self):
         for fpath in self:
             for proto in self[fpath]:
                 return proto.name
     
-    def non_tests(self):
+    def non_test_fpaths(self):
         for fpath in self:
             if 'test/' not in fpath:
                 yield fpath
-        
+                
+    def non_test_prototypes(self):
+        for fpath in self.non_test_fpaths():
+            for proto in self[fpath]:
+                yield proto
+
+    def find_best(self):
+        '''
+        Given a dict of file path --> list of self in that file, find the best
+        prototype to use as a starting point for modification.
+        '''
+        # By preference, choose a prototype that's in a .c, has a body (instead of being
+        # a declaration only), and that isn't in our tests. This gives us the best chance
+        # of starting from a prototype that has named parameters. A second best alternative
+        # would be a declaration in a non-test .c file.
+        second_best = None
+        for fpath, protos in self.iteritems():
+            if fpath.endswith('*.c') and 'test/' not in fpath:
+                for p in protos:
+                    if p.start_of_body:
+                        return p
+                    else:
+                        second_best = p
+        if second_best:
+            return second_best
+        # Failing that, look for a prototype in a header, but not in tests. In case the
+        # function is declared multiple times in headers, pick the version that has an
+        # inline impl by preference.
+        for fpath, protos in self.iteritems():
+            if fpath.endswith('*.h') and 'test/' not in fpath:
+                for p in protos:
+                    if p.start_of_body:
+                        return p
+                    else:
+                        second_best = p
+        if second_best:
+            return second_best
+        # Failing that, pick the first prototype.
+        for protos in self.values():
+            for p in protos:
+                return p

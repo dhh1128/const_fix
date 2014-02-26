@@ -11,15 +11,15 @@ class param_name_rollback:
                 proto.dirty = False
 
 class const_rollback:
-    def __init__(self, param, prototypes, param_idx):
-        param.set_const(False)
+    def __init__(self, param, prototypes, param_idx, rolled_back_state):
+        param.set_const(rolled_back_state)
         self.data_type = param.data_type
         self.prototypes = prototypes
         self.param_idx = param_idx
     def __call__(self):
         for fpath in self.prototypes:
             for proto in self.prototypes[fpath]:
-                proto.params[param_idx].data_type = self.data_type
+                proto.params[self.param_idx].data_type = self.data_type
                 proto.dirty = False
 
 def _name_to_backup_name(fname):
