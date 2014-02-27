@@ -2,6 +2,7 @@ import os, sys, re
 
 from param import Param
 
+_label_not_proto_pat = re.compile(r':[ \t\r]*\n')
 _prototype_pat_template = r'^[ \t]*((?:[_a-zA-Z][_a-zA-Z0-9:]*)[^-;{}()=+!<>/|^]*?(?:\s+|\*|\?))(%s)\s*\(([^()]*?)\)(\s*const)?\s*([{;])'
 # Matches lines like this: mock((void *)0, void *, __MRMQueryThread,(void *Args))
 _old_mock_proto_pat_template = r'^\s*mock\s*\((.*?),\s*(.*?),\s*(%s)\s*,\s*\((.*?)\)\)\s*$'
@@ -145,6 +146,7 @@ class Prototype:
             self.end_of_body = _find_end_of_body(txt, self.start_of_body)
             self.original = self.original.rstrip()
         self.params = _split_params(txt, match.start(3), match.end(3))
+        self.dirty = False
         
     @property
     def name(self):
@@ -170,15 +172,15 @@ class Prototype:
         return False
     
     def matches(self, other):
-        if len(self.args) == len(other.args):
-            for i in xrange(len(self.args)):
-                type_a = self.get_arg_type(i)
-                type_b = self.get_arg_type(i)
+        if len(self.params) == len(other.params):
+            if len(self.params) != len(other.params):
+                return False
+            for i in xrange(len(self.params)):
+                type_a = self.params[i].data_type
+                type_b = other.params[i].data_type
                 if type_a != type_b:
                     return False
-        else:
-            return False
-        return True
+        return False
     
     def prove_param_cant_be_const(self, param_idx):
         if self.start_of_body:
@@ -203,6 +205,10 @@ class Prototype:
                             pat = re.compile(r'\*%s\s*(\+[+=]|-[-=]|=(?!=))' % name)
                             if pat.search(self.txt, self.start_of_body, self.end_of_body):
                                 return True
+                        else:
+                            pat = re.compile(r'[^a-zA-Z0-9_]%s\s*(\+[+=]|-[-=]|=(?!=))' % name)
+                            if pat.search(self.txt, self.start_of_body, self.end_of_body):
+                                return True
         return False
     
 def find_prototypes_in_file(func, fpath):
@@ -218,7 +224,8 @@ def find_prototypes_in_file(func, fpath):
     expr = re.compile(_prototype_pat_template % func, re.MULTILINE)
     protos = []
     for m in expr.finditer(txt):
-        protos.append(Prototype(fpath, txt, m))
+        if not _label_not_proto_pat.search(m.group(1)):
+            protos.append(Prototype(fpath, txt, m))
     if 'test/' in fpath:
         test_pats = [re.compile(pat % func, re.DOTALL | re.MULTILINE) for pat in test_proto_pats]
         for pat in test_pats:
@@ -263,6 +270,16 @@ class PrototypeMap(dict):
         for fpath in self.non_test_fpaths():
             for proto in self[fpath]:
                 yield proto
+                
+    def dirty_fpaths(self):
+        for fpath in self:
+            is_dirty = False
+            for proto in self[fpath]:
+                if proto.dirty:
+                    is_dirty = True
+                    break
+            if is_dirty:
+                yield fpath
 
     def find_best(self):
         '''

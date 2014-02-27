@@ -36,10 +36,7 @@ abbreviatable = {
     
 def _squeeze(txt):
     '''Replace all runs of whitepace with a single space, and trim front and back.'''
-    txt = txt.strip().replace('\r', ' ').replace('\n', ' ').replace('\t', ' ')
-    while txt.find('  ') > -1:
-        txt = txt.replace('  ', ' ')
-    return txt
+    return re.sub(r'\s{2,}', ' ', txt).strip()
     
 def normalize_type(typ):
     '''
@@ -92,7 +89,7 @@ class Param:
                         proposed += c.upper()
                         cap_next = False
                     else:
-                        proposed = c
+                        proposed += c
             return proposed
 
     def is_const_candidate(self):
@@ -129,9 +126,9 @@ class Param:
         i = self.get_pivot_point()
         if value:
             if not self.is_const():
-                self.data_type = self.data_type[:i].rstrip() + ' const ' + self.data_type[i:]
+                self.data_type = _squeeze(self.data_type[:i].rstrip() + ' const ' + self.data_type[i:])
         elif self.is_const():
-            self.data_type = re.sub(r'\s{2,}', ' ', self.data_type.replace('const', ''))            
+            self.data_type = _squeeze(self.data_type.replace('const', ''))
 
     def _parse(self):
         decl = _squeeze(self.decl)

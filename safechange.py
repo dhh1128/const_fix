@@ -1,9 +1,7 @@
 import os
 
 class param_name_rollback:
-    def __init__(self, prototypes):
-        self.prototypes = prototypes
-    def __call__(self):
+    def __call__(self, prototypes):
         for fpath in prototypes:
             for proto in prototypes[fpath]:
                 for param in proto.params:
@@ -11,14 +9,13 @@ class param_name_rollback:
                 proto.dirty = False
 
 class const_rollback:
-    def __init__(self, param, prototypes, param_idx, rolled_back_state):
+    def __init__(self, param, param_idx, rolled_back_state):
         param.set_const(rolled_back_state)
         self.data_type = param.data_type
-        self.prototypes = prototypes
         self.param_idx = param_idx
-    def __call__(self):
-        for fpath in self.prototypes:
-            for proto in self.prototypes[fpath]:
+    def __call__(self, prototypes):
+        for fpath in prototypes:
+            for proto in prototypes[fpath]:
                 proto.params[self.param_idx].data_type = self.data_type
                 proto.dirty = False
 

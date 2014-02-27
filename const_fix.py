@@ -13,7 +13,10 @@ clean_tests_cmd = 'scons -c'
 test_log = '/tmp/test.log'
 test_cmd = 'scons -j6 >%s 2>&1' % test_log
 
-const_error_pat_template = r'In function [^(]+ %s\s*\(.*?error: assignment of member ‘[^‘]+’ in read-only object'
+const_error_pat_template = r'In function [^(]+ %s\s*\(.*?error: (' + \
+    'passing ‘const[^\n]+discards qualifiers|' + \
+    'assignment of member ‘[^‘]+’ in read-only object|' + \
+    'invalid conversion from ‘const[^‘]+’ to ‘(?!const))'
 
 def run(cmd):
     print('  ' + cmd)
@@ -84,10 +87,12 @@ def improve_param_names(root, prototypes):
         # changes could fail is that a parameter isn't used, so adding a name for
         # it causes a warning.
         rewrite_prototypes(prototypes)
-        if prove_safe_change(root, param_name_rollback(prototypes), prototypes.function_name):
+        if prove_safe_change(root, prototypes, param_name_rollback()):
             for proto in prototypes.non_test_prototypes():
                 for param in proto.params:
-                    param.name = param.new_name
+                    if param.new_name:
+                        param.name = param.new_name
+                    param.decl = str(param)
             return True
         
     return False
@@ -99,9 +104,9 @@ def tests_pass(root):
         os.chdir(os.path.join(root, 'test'))
         exitcode = run(test_cmd)
         if exitcode:
-            print('Tests failed. See %s for details.\n' % test_log)
+            print('  Tests failed. See %s for details.' % test_log)
         else:
-            print('Tests pass.\n')
+            print('  Tests pass.')
         return exitcode == 0
     finally:
         os.chdir(oldcwd)
@@ -110,7 +115,7 @@ def get_compile_log_tail():
     with open(compile_log, 'r') as f:
         txt = f.read()
     if len(txt) > 2000:
-        txt = txt[:-2000]
+        txt = txt[-2000:]
     return txt
 
 def compile_is_clean(root, changed_func=None):
@@ -123,7 +128,7 @@ def compile_is_clean(root, changed_func=None):
             dont_bother_with_clean = False
             if changed_func:
                 tail = get_compile_log_tail()
-                pat = const_error_pat_template % changed_func
+                pat = re.compile(const_error_pat_template % changed_func, re.DOTALL | re.MULTILINE)
                 if pat.search(tail):
                     dont_bother_with_clean = True
             if dont_bother_with_clean:
@@ -141,75 +146,88 @@ def compile_is_clean(root, changed_func=None):
                 run(clean_tests_cmd)
                 exitcode = run(compile_tests_cmd)
         if exitcode:
-            print('Clean compile failed. See %s for details.\n' % compile_log)
+            print('  Clean compile failed. See %s for details.' % compile_log)
         else:
-            print('Compile succeeded.\n')
+            print('  Compile succeeded.')
         return exitcode == 0
     finally:
         os.chdir(oldcwd) 
 
 def rewrite_prototypes(prototypes):
-    for fpath in prototypes:
-        file_is_dirty = False
+    for fpath in prototypes.dirty_fpaths():
+        backup_file(fpath)
+        with open(fpath, 'r') as f:
+            txt = f.read()
+        i = 0
+        new_txt = ''
+        new_names = []
         for proto in prototypes[fpath]:
-            if proto.dirty:
-                file_is_dirty = True
-                break
-        if file_is_dirty:
-            backup_file(fpath)
-            with open(fpath, 'r') as f:
-                txt = f.read()
-            i = 0
-            new_txt = ''
-            new_names = []
-            for proto in prototypes[fpath]:
-                for param in proto.params:
-                    if proto.start_of_body and param.new_name and param.new_name != param.name:
-                        new_names.append(re.compile(r'(\W)%s(\W)' % param.name))
-                        new_names.append(re.compile(r'\1%s\2' % param.new_name))
-                    new_txt += txt[i:param.begin]
-                    new_txt += str(param)
-                    i = param.begin + len(param.decl)
-            if new_names:
-                new_txt += txt[i:proto.start_of_body]
-                body = txt[proto.start_of_body:proto.end_of_body]
-                for j in xrange(len(new_names)):
-                    body = new_names[j].sub(new_names[j + 1], body)
-                new_txt += body
-                i = proto.end_of_body
-            new_txt += txt[i:]
-            with open(fpath, 'w') as f:
-                f.write(new_txt)
+            for param in proto.params:
+                if proto.start_of_body and param.new_name and param.new_name != param.name:
+                    new_names.append((re.compile(r'(\W)(?<![.>])%s(\W)' % param.name), r'\1%s\2' % param.new_name))
+                new_txt += txt[i:param.begin]
+                new_txt += str(param)
+                i = param.begin + len(param.decl)
+        if new_names:
+            new_txt += txt[i:proto.start_of_body]
+            body = txt[proto.start_of_body:proto.end_of_body]
+            for pair in new_names:
+                body = pair[0].sub(pair[1], body)
+            new_txt += body
+            i = proto.end_of_body
+        new_txt += txt[i:]
+        with open(fpath, 'w') as f:
+            f.write(new_txt)
             
 def _pluralize(noun, count):
     if count == 1:
         return noun
     return noun + 's'
 
-def prove_safe_change(root, undo_func, changed_func):
-    if not compile_is_clean(root) or not tests_pass(root):
-        undo_func()
-        print("  Change doesn't work; backing it out.")
-        for fpath in prototypes:
+def prove_safe_change(root, prototypes, undo_func):
+    if not compile_is_clean(root, prototypes.function_name) or not tests_pass(root):
+        print("  Change doesn't work. Backing it out.")
+        for fpath in prototypes.dirty_fpaths():
             restore_file(fpath)
-        if not compile_is_clean(root, changed_func) or not tests_pass(root):
+        undo_func(prototypes)
+        if not compile_is_clean(root, prototypes.function_name) or not tests_pass(root):
             print('Unable to get back to a clean state; exiting prematurely.')
             sys.exit(1)
+        return False
     else:
-        print("  %s works; keeping change." % impl.get_ideal())
+        print("  It works. Keeping change.")
+        return True
         
 def fix_func(func, root, cg, tags):
     # Locate every place where this function's prototype appears.
     # In some cases, the prototype might be followed by a body; in most cases, not.
     prototypes = find_prototypes_in_codebase(func, root)
     
+    # Find the version of the prototype that's associated with the main implementation
+    # of the function (not the one in test scaffolding). Use it as the standard against
+    # which other prototypes are compared.
+    ok = True
+    impl = prototypes.find_best()
+    for fpath in prototypes:
+        for proto in prototypes[fpath]:
+            if proto is not impl:
+                if not proto.matches(impl):
+                    print("  Prototypes don't match:\n    %s\n      vs\n    %s" % (impl.get_ideal(), proto.get_ideal()))
+                    ok = False
+    if not ok:
+        tags += "INCONSISTENT_PROTOTYPES "
+        return tags
+    
     # We may be able to improve the code by copying param names into places that
     # don't have them.
     improve_param_names(root, prototypes)
             
-    # Find the version of the prototype that's associated with the main implementation
-    # of the function (not the one in test scaffolding).
+    # Re-fetch impl, in case we changed something while improving param names.
     impl = prototypes.find_best()
+    if not impl.start_of_body:
+        print('  Unable to find an implementation of %s. Skipping.' % impl.name)
+        tags += 'NO_IMPL '
+        return tags
     
     if impl.is_const_candidate():
         change_count = 0
@@ -224,22 +242,30 @@ def fix_func(func, root, cg, tags):
                         original_state = False
                         param.set_const(True)
             elif param.is_const():
-                original_state = True
+                # Currently we'll skip remediation of obnoxious const to speed up analysis
+                # and limit diffs.
                 param.set_const(False)
+                if True:
+                    tags += 'OBNOXIOUS_CONST: %s ' % param
+                    print('  Skipping fix of unnecessary const -> %s.' % impl.get_ideal())
+                    param.set_const(True)
+                else:
+                    original_state = True
             if original_state is not None:
+                print('Trying %s...' % impl.get_ideal())
                 for fpath in prototypes:
                     for proto in prototypes[fpath]:
                         proto.params[param_idx].data_type = param.data_type
                         proto.dirty = True
                 rewrite_prototypes(prototypes)
-                if prove_safe_change(root, const_rollback(param, prototypes, param_idx, original_state), impl.name):
+                if prove_safe_change(root, prototypes, const_rollback(param, param_idx, original_state)):
                     change_count += 1
             param_idx += 1
         print('%d %s made.' % (change_count, _pluralize('change', change_count)))
         tags += str(change_count)
         if change_count:
             tags += ' --> ' + impl.get_ideal()
-        tabulate(impl.name + '()', tags)
+    return tags
                 
 CONST_IRRELEVANT = 0
 CONST_MATTERS = 1
@@ -258,18 +284,18 @@ def _classify_func(params):
 
 def verify_clean(root):
     ok = True
-    print('Verifying that codebase is clean before we start...\n')
+    print('Verifying that codebase is clean before we start...')
     if not compile_is_clean(root):
         ok = False
     elif not tests_pass(root):
         ok = False
     if not ok:
-        sys.stderr.write('Prototype fixup in %s aborted.\n' % root)
+        sys.stderr.write('Prototype fixup in %s aborted.' % root)
         sys.exit(1)
         
 def verify_makefile(root):
     if not os.path.isfile(os.path.join(root, 'Makefile')):
-        sys.stderr.write('Did not find Makefile at root of codebase %s.\n' % root)
+        sys.stderr.write('Did not find Makefile at root of codebase %s.' % root)
         sys.exit(1)
         
 def cut_noise(cg, previously_analyzed):
@@ -307,8 +333,11 @@ def prune(cg):
         cg.remove(item)
         
 def tabulate(func, tags):
+    if not func.endswith('()'):
+        func += '()'
     if not hasattr(tags, 'upper'):
         tags = str(tags)[1:-1].replace(',', '')
+        tags = tags.strip()
     with open(outcomes_log, 'a') as f:
         f.write('%s\t%s\n' % (func, tags))
         
@@ -318,7 +347,7 @@ def load_previous_results():
         with open(outcomes_log, 'r') as f:
             lines = f.readlines()
         previously_analyzed = [x[:x.find('\t')] for x in lines if x.find('\t') > -1]
-    print('\nFound %d previously analyzed %s.' % (len(previously_analyzed), _pluralize('function', len(previously_analyzed))))
+    print('Found %d previously analyzed %s.' % (len(previously_analyzed), _pluralize('function', len(previously_analyzed))))
     return previously_analyzed
 
 def fix_prototypes(root):
@@ -342,7 +371,7 @@ def fix_prototypes(root):
     while not cg.is_empty():
         pass_number += 1
         leaves = cg.get_leaves()
-        print('\nPass %d: %d leaves out of %d functions ----------------\n' % (pass_number, len(leaves), len(cg.by_callee)))
+        print('\nPass %d: %d leaves out of %d functions ----------------' % (pass_number, len(leaves), len(cg.by_callee)))
         if len(leaves) == 0:
             # See if we can prune some stuff away by finding functions where const doesn't matter.
             if tried_to_prune:
@@ -354,27 +383,31 @@ def fix_prototypes(root):
                 continue
         else:
             tried_to_prune = False
+            
+        i = 1
         for func in leaves:
             tags = ''
             callers = None
             if func in cg.by_callee:
                 callers = cg.by_callee[func]
             if not callers:
-                print('%s appears to be an orphan, never called.' % func)
+                print('\n%d.%d. %s appears to be an orphan, never called.' % (pass_number, i, func))
                 tags += 'ORPHAN '
             else:
-                pass #print('%s called by %s' % (func, callers))
-            params = cg.get_params(func)
-            cls = _classify_func(params)
-            if cls == CONST_MATTERS:
-                print('Experimenting with changes to %s...' % func)
-                fix_func(func, root, cg, tags)
-                sys.exit(0)
-            elif cls == OBNOXIOUS_CONST:
-                print('%s should not use const, but does.' % func)
-            else:
-                print("Constness is not relevant to %s." % func)
+                params = cg.get_params(func)
+                cls = _classify_func(params)
+                if cls == CONST_MATTERS:
+                    print('\n%d.%d. Experimenting with changes to %s...' % (pass_number, i, func))
+                    tags = fix_func(func, root, cg, tags)
+                elif cls == OBNOXIOUS_CONST:
+                    tags += 'OBNOXIOUS_CAST '
+                    print('%d.%d. %s should not use const, but does.' % (pass_number, i, func))
+                else:
+                    tags += 'CONST_IRRELEVANT '
+                    print("%d.%d. Constness is not relevant to %s." % (pass_number, i, func))
+            tabulate(func, tags)
             cg.remove(func)
+            i += 1
 
 if __name__ == '__main__':
     if len(sys.argv) > 1:
