@@ -6,12 +6,12 @@ from safechange import *
 
 outcomes_log = 'const-outcomes.txt'
 compile_log = '/tmp/make.log'
-compile_cmd = 'make -j6 >%s 2>&1' % compile_log
-compile_tests_cmd = 'scons -n -j6 >%s 2>&1' % compile_log
+compile_cmd = 'make -j8 >%s 2>&1' % compile_log
+compile_tests_cmd = 'scons -f sconstruct.buildonly -j8 >%s 2>&1' % compile_log
 make_clean_cmd = 'make clean >/dev/null 2>&1'
-clean_tests_cmd = 'scons -c'
+clean_tests_cmd = 'scons -c >/dev/null 2>&1'
 test_log = '/tmp/test.log'
-test_cmd = 'scons -j6 >%s 2>&1' % test_log
+test_cmd = 'scons -j8 >%s 2>&1' % test_log
 
 const_error_pat_template = r'In function [^(]+ %s\s*\(.*?error: (' + \
     'passing ‘const[^\n]+discards qualifiers|' + \
@@ -96,7 +96,7 @@ def improve_param_names(root, prototypes):
             return True
         
     return False
-                
+
 def tests_pass(root):
     print('Testing...')
     oldcwd = os.getcwd()
@@ -124,6 +124,7 @@ def compile_is_clean(root, changed_func=None):
     try:
         os.chdir(root)
         exitcode = run(compile_cmd)
+        test_clean = False
         if exitcode:
             dont_bother_with_clean = False
             if changed_func:
@@ -137,12 +138,17 @@ def compile_is_clean(root, changed_func=None):
             else:
                 print('  Incremental compile failed. Trying to clean.')
                 run(make_clean_cmd)
+                test_clean = True
                 exitcode = run(compile_cmd)
         if not exitcode:
             os.chdir(os.path.join(root, 'test'))
-            run(compile_tests_cmd)
-            if exitcode:
-                print('  Incremental compile of tests failed. Trying to clean.')
+            if not test_clean:
+                run(compile_tests_cmd)
+                if exitcode:
+                    print('  Incremental compile of tests failed.')
+                    test_clean = True
+            if test_clean:
+                print('  Trying to clean and then compile tests.')
                 run(clean_tests_cmd)
                 exitcode = run(compile_tests_cmd)
         if exitcode:

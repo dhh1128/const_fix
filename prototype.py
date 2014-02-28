@@ -3,16 +3,18 @@ import os, sys, re
 from param import Param
 
 _label_not_proto_pat = re.compile(r':[ \t\r]*\n')
+# We assume the match will have 5 groups; return type, func name, args, possible const suffix, ending char.
+# This assumption is true for all but new_mocK_cppproto_pat_template.
 _prototype_pat_template = r'^[ \t]*((?:[_a-zA-Z][_a-zA-Z0-9:]*)[^-;{}()=+!<>/|^]*?(?:\s+|\*|\?))(%s)\s*\('
 _end_of_proto_pat = re.compile(r'\)(\s*const)?\s*(?:/\*.*?\*/\s*)?([{;])')
 # Matches lines like this: mock((void *)0, void *, __MRMQueryThread,(void *Args))
-_old_mock_proto_pat_template = r'^\s*mock\s*\((.*?),\s*(.*?),\s*(%s)\s*,\s*\((.*?)\)\)\s*$'
+_old_mock_proto_pat_template = r'^\s*mock\s*\((?:[^,]*?),\s*([^,]*?),\s*(%s)\s*,\s*\(([^)]*?)\)\)(\s*)($)' # 5 groups, but only 3 are meaningful
 
 # Matches lines like this: MOCK_CMETHOD4(int, MGEventItemIterate, mgevent_list_t *, char **, mgevent_obj_t **, mgevent_iter_t *);
-_new_mock_cproto_pat_template = r'^\s*MOCK_CMETHOD\d\s*\(\s*(.*?)\s*,\s*(%s)\s*,\s*(.*?)\)\s*;\s*$'
+_new_mock_cproto_pat_template = r'^\s*MOCK_CMETHOD\d\s*\(\s*([^,]*?)\s*,\s*(%s)\s*,\s*([^)]*?)\)(\s*)(;)\s*$' # 5 groups, but only 3 are meaningful
 
 # Matches lines like this: MOCK_METHOD4(MGEventItemIterate, int(mgevent_list_t *, char **, mgevent_obj_t **, mgevent_iter_t *));
-_new_mock_cppproto_pat_template = r'^\s*MOCK_METHOD\d\s*\(\s*(%s)\s*,\s*([^(]+)\((.*?)\)\s*\)\s*;\s*$'
+_new_mock_cppproto_pat_template = r'^\s*MOCK_METHOD\d\s*\(\s*(%s)\s*,\s*([^(]+)\(([^)]*?)\)\s*\)\s*;\s*$' # 3 groups only
 
 test_proto_pats = [_old_mock_proto_pat_template, _new_mock_cppproto_pat_template, _new_mock_cproto_pat_template]
 
@@ -142,10 +144,15 @@ class Prototype:
         self.start_of_body = None
         self.end_of_body = None
         self.return_type = match.group(1).strip()
-        if match.group(5) == '{':
-            self.start_of_body = match.end(5)
-            self.end_of_body = _find_end_of_body(txt, self.start_of_body)
-            self.original = self.original.rstrip()
+        # Most of the patterns we match with have 5 groups, but
+        # one only has 3...
+        try:
+            if match.group(5) == '{':
+                self.start_of_body = match.end(5)
+                self.end_of_body = _find_end_of_body(txt, self.start_of_body)
+                self.original = self.original.rstrip()
+        except IndexError:
+            pass
         self.params = _split_params(txt, match.start(3), match.end(3))
         self.dirty = False
         
@@ -297,7 +304,7 @@ def find_prototypes_in_codebase(func, root, files=None):
             for d in skip:
                 dirs.remove(d)
             for f in files:
-                if (not f.startswith('.')) and (f.endswith('.h') or f.endswith('.c')):
+                if (not f.startswith('.')) and (f.endswith('.h') or f.endswith('.c') or f.endswith('.cpp')):
                     fpath = os.path.join(root, f)
                     in_this_file = find_prototypes_in_file(func, fpath)
                     if in_this_file:

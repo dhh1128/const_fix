@@ -5,6 +5,7 @@ const_prefix_pat = re.compile('^const ([a-zA-Z0-9_]+)(.*)$')
 moab_type_pat = re.compile('.*\Wm[a-z_0-9]+_t$')
 datatype_names = 'int|short|long|double|float|char|bool'.split('|')
 moab_struct_naming_pat = re.compile(r'm([a-z_]+)_t(?=$|\W)')
+moab_common_out_pat = re.compile(r'(m?u?(long|int)|mbool_t)\s*\*\s*$')
 
 splittable = [
     'table',
@@ -102,10 +103,15 @@ class Param:
         # so their constness is irrelevant.
         if i == -1 and j == -1:
             return False
-        # Just an optimization that applies to moab specifically; EMsg
-        # bufs are passed around to accumulate error messages; we know they
-        # are modified.
+        # Just some optimizations that applies to moab specifically.
+        # 1. EMsg bufs are passed around to accumulate error messages; we
+        #    know they are modified.
+        # 2. It's common in the codebase to see pointers to numeric types
+        #    passed for OUT params: int * size, long * count, etc. These
+        #    are also not worth checking.
         if i > -1 and self.data_type == 'char *' and self.name == 'EMsg':
+            return False
+        if i > -1 and moab_common_out_pat.match(self.data_type):
             return False
         # Params that are *& are virtually guaranteed to be OUT params,
         # so their constness should not be adjusted.
