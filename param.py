@@ -46,7 +46,7 @@ def normalize_type(typ):
       const char* --> char const *
       mjob_t  & --> mjob_t &
     '''
-    typ = _squeeze(typ.replace('*', ' * ').replace('&', ' & '))
+    typ = _squeeze(typ.replace('*', ' * ').replace('&', ' & ')).replace('* *', '**')
     m = const_prefix_pat.match(typ)
     if m:
         typ = '%s const%s' % (m.group(1), m.group(2))
@@ -94,11 +94,18 @@ class Param:
 
     def is_const_candidate(self):
         dt = self.data_type
+        if 'void' in dt:
+            return False
         i = dt.find('*')
         j = dt.find('&')
         # Params that are not pointers or references are passed by value,
         # so their constness is irrelevant.
         if i == -1 and j == -1:
+            return False
+        # Just an optimization that applies to moab specifically; EMsg
+        # bufs are passed around to accumulate error messages; we know they
+        # are modified.
+        if i > -1 and self.data_type == 'char *' and self.name == 'EMsg':
             return False
         # Params that are *& are virtually guaranteed to be OUT params,
         # so their constness should not be adjusted.
@@ -107,6 +114,7 @@ class Param:
         # Same for **.
         if i > -1 and i < dt.rfind('*'): 
             return False
+        
         return True
 
     def is_const(self):

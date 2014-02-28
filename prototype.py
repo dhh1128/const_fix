@@ -3,7 +3,8 @@ import os, sys, re
 from param import Param
 
 _label_not_proto_pat = re.compile(r':[ \t\r]*\n')
-_prototype_pat_template = r'^[ \t]*((?:[_a-zA-Z][_a-zA-Z0-9:]*)[^-;{}()=+!<>/|^]*?(?:\s+|\*|\?))(%s)\s*\(([^()]*?)\)(\s*const)?\s*([{;])'
+_prototype_pat_template = r'^[ \t]*((?:[_a-zA-Z][_a-zA-Z0-9:]*)[^-;{}()=+!<>/|^]*?(?:\s+|\*|\?))(%s)\s*\('
+_end_of_proto_pat = re.compile(r'\)(\s*const)?\s*(?:/\*.*?\*/\s*)?([{;])')
 # Matches lines like this: mock((void *)0, void *, __MRMQueryThread,(void *Args))
 _old_mock_proto_pat_template = r'^\s*mock\s*\((.*?),\s*(.*?),\s*(%s)\s*,\s*\((.*?)\)\)\s*$'
 
@@ -59,8 +60,8 @@ def _split_params(txt, i, end):
                     if begin is None:                            
                         two = txt[i:i+2]
                         if two == '/*':
-                            i = txt.find('*/', i + 2)
-                            assert i > -1
+                            i = txt.find('*/', i + 2) + 1
+                            assert i > 0
                         elif two == '//':
                             i = txt.find('\n', i + 2)
                             assert i > -1
@@ -173,13 +174,12 @@ class Prototype:
     
     def matches(self, other):
         if len(self.params) == len(other.params):
-            if len(self.params) != len(other.params):
-                return False
             for i in xrange(len(self.params)):
                 type_a = self.params[i].data_type
                 type_b = other.params[i].data_type
                 if type_a != type_b:
                     return False
+            return True
         return False
     
     def prove_param_cant_be_const(self, param_idx):
@@ -211,6 +211,57 @@ class Prototype:
                                 return True
         return False
     
+def adjust_match_if_true_prototype(txt, m):
+    # There's no good way, with regex, to tolerate comments and string literals inside a
+    # prototype or function call. They do occur, even in prototypes. A string literal can
+    # happen because of a default parameter:
+    #
+    #    int do_something(char const * token="abc");
+    #
+    # This isn't common in our codebase, but it does happen.
+    # Comments inside prototypes are actually very common, because we use them to
+    # document parameter semantics (whether the param is an IN or an OUT param, typically).
+    # Therefore, we have to write code to find the ) that ends a function call or prototype,
+    # and see whether it's really and truly a prototype instead of a call.
+    in_quote = False
+    paren_count = 1
+    begin = i = m.end()
+    end = len(txt)
+    while i < end:
+        c = txt[i]
+        if in_quote:
+            if c == '"':
+                in_quote = False
+            elif c == '\\':
+                i += 1
+        else:
+            if c == ')':
+                paren_count -= 1
+                if paren_count == 0:
+                    # Okay, now do a sanity check to make sure we have
+                    # a true prototype.
+                    next = txt[i:i+200]
+                    if _end_of_proto_pat.match(next):
+                        # Re-write the regex so we can give back a match
+                        # object with all the right pieces grouped.
+                        pat_txt = '%s(.{%d})%s' % ((_prototype_pat_template % m.group(2)), i - begin, _end_of_proto_pat.pattern)
+                        pat = re.compile(pat_txt, re.MULTILINE | re.DOTALL)
+                        m = pat.match(txt, m.start())
+                        assert m
+                        return m
+            elif c == '(':
+                paren_count += 1
+            elif c == '/':
+                if txt[i + 1] == '/':
+                    i = txt.find('\n', i)
+                    assert i > -1
+                elif txt[i + 1] == '*':
+                    i = txt.find('*/', i + 2) + 1
+                    assert i > 0
+            elif c == '"':
+                in_quote = True
+        i += 1
+    
 def find_prototypes_in_file(func, fpath):
     with open(fpath, 'r') as f:
         txt = f.read()
@@ -225,7 +276,9 @@ def find_prototypes_in_file(func, fpath):
     protos = []
     for m in expr.finditer(txt):
         if not _label_not_proto_pat.search(m.group(1)):
-            protos.append(Prototype(fpath, txt, m))
+            m = adjust_match_if_true_prototype(txt, m)
+            if m:
+                protos.append(Prototype(fpath, txt, m))
     if 'test/' in fpath:
         test_pats = [re.compile(pat % func, re.DOTALL | re.MULTILINE) for pat in test_proto_pats]
         for pat in test_pats:
@@ -292,7 +345,7 @@ class PrototypeMap(dict):
         # would be a declaration in a non-test .c file.
         second_best = None
         for fpath, protos in self.iteritems():
-            if fpath.endswith('*.c') and 'test/' not in fpath:
+            if fpath.endswith('.c') and 'test/' not in fpath:
                 for p in protos:
                     if p.start_of_body:
                         return p
@@ -304,7 +357,7 @@ class PrototypeMap(dict):
         # function is declared multiple times in headers, pick the version that has an
         # inline impl by preference.
         for fpath, protos in self.iteritems():
-            if fpath.endswith('*.h') and 'test/' not in fpath:
+            if fpath.endswith('.h') and 'test/' not in fpath:
                 for p in protos:
                     if p.start_of_body:
                         return p

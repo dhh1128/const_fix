@@ -220,10 +220,15 @@ def fix_func(func, root, cg, tags):
     
     # We may be able to improve the code by copying param names into places that
     # don't have them.
-    improve_param_names(root, prototypes)
+    if improve_param_names(root, prototypes):
+        tags += "PARAM_NAMES_IMPROVED "
+        # Rather than trying to update every offset and every param name for every
+        # prototype, in RAM, it's safer to just reload from disk after we make
+        # changes.
+        prototypes = find_prototypes_in_codebase(func, root)
+        # Re-fetch impl,
+        impl = prototypes.find_best()
             
-    # Re-fetch impl, in case we changed something while improving param names.
-    impl = prototypes.find_best()
     if not impl.start_of_body:
         print('  Unable to find an implementation of %s. Skipping.' % impl.name)
         tags += 'NO_IMPL '
@@ -232,7 +237,8 @@ def fix_func(func, root, cg, tags):
     if impl.is_const_candidate():
         change_count = 0
         param_idx = 0
-        for param in impl.params:
+        while param_idx < len(impl.params):
+            param = impl.params[param_idx]
             original_state = None
             if param.is_const_candidate():
                 if not param.is_const():
@@ -259,12 +265,20 @@ def fix_func(func, root, cg, tags):
                         proto.dirty = True
                 rewrite_prototypes(prototypes)
                 if prove_safe_change(root, prototypes, const_rollback(param, param_idx, original_state)):
+                    # Rather than trying to update every offset and every param name for every
+                    # prototype, in RAM, it's safer to just reload from disk after we make
+                    # changes.
+                    prototypes = find_prototypes_in_codebase(func, root)
+                    # Re-fetch impl,
+                    impl = prototypes.find_best()
                     change_count += 1
             param_idx += 1
         print('%d %s made.' % (change_count, _pluralize('change', change_count)))
         tags += str(change_count)
         if change_count:
             tags += ' --> ' + impl.get_ideal()
+    else:
+        tags += 'CANT_MODIFY'
     return tags
                 
 CONST_IRRELEVANT = 0
@@ -276,7 +290,7 @@ def _classify_func(params):
     cls = CONST_IRRELEVANT
     if params:
         for p in params:
-            if ('*' in p or '&' in p) and ('const' not in p):
+            if ('*' in p or '&' in p) and ('const' not in p) and ('void' not in p):
                 return CONST_MATTERS
             elif 'const' in p:
                 cls = OBNOXIOUS_CONST
