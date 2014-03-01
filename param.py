@@ -154,12 +154,17 @@ class Param:
         if not (decl.endswith('*') or decl.endswith('&') or moab_type_pat.match(decl)):
             i = decl.rfind(' ')
             if i > -1:
-                name_idx = i + 1
-                while decl[name_idx] == '*' or decl[name_idx] == '&':
-                    name_idx += 1
-                name = decl[name_idx:]
-                if name in datatype_names:
-                    name_idx = -1
+                # Make sure we're not hitting a C-ism that confuses us.
+                prefix = decl[:i]
+                if (prefix != 'enum') and (prefix != 'struct'):
+                    name_idx = i + 1
+                    while decl[name_idx] == '*' or decl[name_idx] == '&':
+                        name_idx += 1
+                    name = decl[name_idx:]
+                    if name in datatype_names:
+                        name_idx = -1
+                else:
+                    pass
         if name_idx > -1:
             self.data_type = decl[0:name_idx].rstrip()
             self.name = decl[name_idx:]
