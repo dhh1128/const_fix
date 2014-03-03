@@ -33,6 +33,7 @@ abbreviatable = {
     'trigger': 'trig',
     'resource': 'res',
     'reservation': 'rsv',
+    'class': 'cls'
 }
     
 def _squeeze(txt):

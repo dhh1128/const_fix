@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os, sys, re, weakref
 
 import callgraph
@@ -205,6 +206,9 @@ def prove_safe_change(root, prototypes, undo_func):
         return True
         
 def fix_func(func, root, cg, tags):
+    if func.lower().endswith("printf"):
+        tags += "SKIPPED"
+        return tags
     # Locate every place where this function's prototype appears.
     # In some cases, the prototype might be followed by a body; in most cases, not.
     prototypes = find_prototypes_in_codebase(func, root)
@@ -249,6 +253,7 @@ def fix_func(func, root, cg, tags):
             if param.is_const_candidate():
                 if not param.is_const():
                     if impl.prove_param_cant_be_const(param_idx):
+                        print("Proved that param %d can't be const." % (param_idx + 1))
                         pass
                     else:
                         original_state = False

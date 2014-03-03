@@ -68,7 +68,7 @@ def _split_params(txt, i, end):
                             i = txt.find('\n', i + 2)
                             assert i > -1
                         else:
-                            assert False
+                            pass #assert False
                     else:
                         if cut_position is None:
                             cut_position = i
@@ -108,10 +108,13 @@ def _find_end_of_body(txt, first_body_idx):
     i = first_body_idx
     while i < end:
         c = txt[i]
+        # Could happen in either double-quoted string
+        # literal, or single-quoted char literal
+        if c == '\\':
+            i += 2
+            continue
         if in_quote:
-            if c == '\\':
-                i += 1
-            elif c == '"':
+            if c == '"':
                 in_quote = False
         else:
             if c == '{':
@@ -123,8 +126,10 @@ def _find_end_of_body(txt, first_body_idx):
             elif c == '/':
                 if txt[i + 1] == '*':
                     i = txt.find('*/', i + 2) + 1
+                    assert i > 0
                 elif txt[i + 1] == '/':
-                    i = txt.find('\n')
+                    i = txt.find('\n', i)
+                    assert i > 0
             elif c == '"':
                 in_quote = True
         i += 1
@@ -282,9 +287,10 @@ def find_prototypes_in_file(func, fpath):
     expr = re.compile(_prototype_pat_template % func, re.MULTILINE)
     protos = []
     for m in expr.finditer(txt):
-        if not _label_not_proto_pat.search(m.group(1)):
+        if not _label_not_proto_pat.search(m.group(1)) and not m.group(1).startswith('else'):
             m = adjust_match_if_true_prototype(txt, m)
             if m:
+                #print('matched in %s; "%s"' % (fpath, txt[m.start():m.end()]))
                 protos.append(Prototype(fpath, txt, m))
     if 'test/' in fpath:
         test_pats = [re.compile(pat % func, re.DOTALL | re.MULTILINE) for pat in test_proto_pats]
