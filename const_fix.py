@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, sys, re, weakref
+import os, sys, re, traceback
 
 import callgraph
 from prototype import *
@@ -230,7 +230,7 @@ def fix_func(func, root, cg, tags):
     
     # We may be able to improve the code by copying param names into places that
     # don't have them.
-    if improve_param_names(root, prototypes):
+    if False and improve_param_names(root, prototypes):
         tags += "PARAM_NAMES_IMPROVED "
         # Rather than trying to update every offset and every param name for every
         # prototype, in RAM, it's safer to just reload from disk after we make
@@ -418,25 +418,49 @@ def fix_prototypes(root):
             if not callers:
                 print('\n%d.%d. %s appears to be an orphan, never called.' % (pass_number, i, func))
                 tags += 'ORPHAN '
-            else:
-                params = cg.get_params(func)
-                cls = _classify_func(params)
-                if cls == CONST_MATTERS:
-                    print('\n%d.%d. Experimenting with changes to %s...' % (pass_number, i, func))
+            params = cg.get_params(func)
+            cls = _classify_func(params)
+            if cls == CONST_MATTERS:
+                print('\n%d.%d. Experimenting with changes to %s...' % (pass_number, i, func))
+                try:
                     tags = fix_func(func, root, cg, tags)
-                elif cls == OBNOXIOUS_CONST:
-                    tags += 'OBNOXIOUS_CAST '
-                    print('%d.%d. %s should not use const, but does.' % (pass_number, i, func))
-                else:
-                    tags += 'CONST_IRRELEVANT '
-                    print("%d.%d. Constness is not relevant to %s." % (pass_number, i, func))
+                except SystemExit:
+                    raise
+                except KeyboardInterrupt:
+                    raise
+                except:
+                    traceback.print_exc()
+                    tags += 'EXCEPTION '
+            elif cls == OBNOXIOUS_CONST:
+                tags += 'OBNOXIOUS_CONST '
+                print('%d.%d. %s should not use const, but does.' % (pass_number, i, func))
+            else:
+                tags += 'CONST_IRRELEVANT '
+                print("%d.%d. Constness is not relevant to %s." % (pass_number, i, func))
             tabulate(func, tags)
             cg.remove(func)
             i += 1
 
+def report_crash():
+    import smtplib
+    from email.mime.text import MIMEText
+    msg = MIMEText(traceback.format_exc())
+    msg['Subject'] = 'const_fix crashed'
+    frm = 'daniel@springville.ac'
+    to = 'dhardman@adaptivecomputing.com'
+    msg['From'] = frm
+    msg['To'] = to
+    s = smtplib.SMTP('localhost')
+    s.sendmail(frm, [to], msg.as_string())
+    s.quit()
+
 if __name__ == '__main__':
-    if len(sys.argv) > 1:
-        folder = sys.argv[1]
-    else:
-        folder = '.'
-    sys.exit(fix_prototypes(folder))
+    try:
+        if len(sys.argv) > 1:
+            folder = sys.argv[1]
+        else:
+            folder = '.'
+        sys.exit(fix_prototypes(folder))
+    except:
+        report_crash()
+        raise
