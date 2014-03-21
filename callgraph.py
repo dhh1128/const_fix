@@ -144,9 +144,12 @@ def _get_doxy_date(folder):
     return 0
 
 def _get_vcs_date(folder):
-    info = os.stat(os.path.join(folder, '.git', 'FETCH_HEAD'))
-    if info:
-        return info.st_mtime
+    try:
+        info = os.stat(os.path.join(folder, '.git', 'FETCH_HEAD'))
+        if info:
+            return info.st_mtime
+    except:
+        pass
     return 0
 
 class Callgraph:

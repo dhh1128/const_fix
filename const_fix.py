@@ -315,19 +315,21 @@ def verify_clean(root):
     elif not tests_pass(root):
         ok = False
     if not ok:
-        sys.stderr.write('Prototype fixup in %s aborted.' % root)
+        sys.stderr.write('Prototype fixup in %s aborted.\n' % root)
         sys.exit(1)
         
 def verify_makefile(root):
     if not os.path.isfile(os.path.join(root, 'Makefile')):
-        sys.stderr.write('Did not find Makefile at root of codebase %s.' % root)
+        sys.stderr.write('Did not find Makefile at root of codebase %s.\n' % root)
         sys.exit(1)
         
 def cut_noise(cg, previously_analyzed):
+    num_removed = 0
     if previously_analyzed:
         print('Eliminating previously analyzed functions...')
         for func in previously_analyzed:
             cg.remove(func)
+            num_removed += 1
         print('Reduced function count from %d to %d.' % (len(cg.by_caller) + len(previously_analyzed), len(cg.by_caller)))            
     
     cuttable = []
@@ -343,9 +345,12 @@ def cut_noise(cg, previously_analyzed):
             for func in cuttable:
                 f.write('%s\t%s\n' % (func, lbl))
                 cg.remove(func)
+                num_removed += 1
         print('Reduced function count from %d to %d.' % (len(cg.by_caller) + len(cuttable), len(cg.by_caller)))
+    return num_removed
     
 def prune(cg):
+    num_pruned = 0
     to_prune = []
     for func in cg.by_caller:
         params = cg.get_params(func)
@@ -356,6 +361,8 @@ def prune(cg):
     print('pruning %d items: %s' % (len(to_prune), to_prune))
     for item in to_prune:
         cg.remove(item)
+        num_pruned += 1
+    return num_pruned
         
 def tabulate(func, tags):
     if not func.endswith('()'):
@@ -375,7 +382,7 @@ def load_previous_results():
     print('Found %d previously analyzed %s.' % (len(previously_analyzed), _pluralize('function', len(previously_analyzed))))
     return previously_analyzed
 
-def fix_prototypes(root):
+def fix_prototypes(root, start_count=0, end_count=0):
     print('')    
     root = os.path.normpath(os.path.abspath(root))
     
@@ -387,9 +394,10 @@ def fix_prototypes(root):
     
     print('Loading call graph...')
     cg = callgraph.Callgraph(root)
+    func_count = len(cg.by_callee.keys())
     
     previously_analyzed = load_previous_results()
-    cut_noise(cg, previously_analyzed)
+    func_count -= cut_noise(cg, previously_analyzed)
         
     tried_to_prune = False
     pass_number = 0
@@ -400,11 +408,11 @@ def fix_prototypes(root):
         if len(leaves) == 0:
             # See if we can prune some stuff away by finding functions where const doesn't matter.
             if tried_to_prune:
-                print('Stuck; no functions are leaves.')
-                sys.exit(1)
+                print('No functions are leaves; fixes after this point may be hit or miss because they are hampered by function interdependencies.')
+                leaves = cg.by_caller.keys()
             else:
                 tried_to_prune = True
-                prune(cg)
+                func_count -= prune(cg)
                 continue
         else:
             tried_to_prune = False
@@ -423,7 +431,10 @@ def fix_prototypes(root):
             if cls == CONST_MATTERS:
                 print('\n%d.%d. Experimenting with changes to %s...' % (pass_number, i, func))
                 try:
-                    tags = fix_func(func, root, cg, tags)
+                    if (start_count > 0 and func_count > start_count):
+                        tags += 'SKIPPED '
+                    else:
+                        tags = fix_func(func, root, cg, tags)
                 except SystemExit:
                     raise
                 except KeyboardInterrupt:
@@ -439,6 +450,9 @@ def fix_prototypes(root):
                 print("%d.%d. Constness is not relevant to %s." % (pass_number, i, func))
             tabulate(func, tags)
             cg.remove(func)
+            func_count -= 1
+            if (end_count > 0 and func_count <= end_count):
+                break
             i += 1
 
 def report_crash():
@@ -455,12 +469,18 @@ def report_crash():
     s.quit()
 
 if __name__ == '__main__':
+    start_count = 0
+    end_count = 0
     try:
         if len(sys.argv) > 1:
             folder = sys.argv[1]
+            if len(sys.argv) > 2:
+                start_count = int(sys.argv[2])
+                if len(sys.argv) > 3:
+                    end_count = int(sys.argv[3])
         else:
             folder = '.'
-        sys.exit(fix_prototypes(folder))
+        sys.exit(fix_prototypes(folder, start_count, end_count))
     except:
         report_crash()
         raise
