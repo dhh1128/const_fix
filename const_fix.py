@@ -8,11 +8,11 @@ from safechange import *
 outcomes_log = 'const-outcomes.txt'
 compile_log = '/tmp/make.log'
 compile_cmd = 'make -j8 >%s 2>&1' % compile_log
-compile_tests_cmd = 'scons -f sconstruct.buildonly -j8 >%s 2>&1' % compile_log
+compile_tests_cmd = 'hostname' # no-op; just run a command that succeeds quickly
 make_clean_cmd = 'make clean >/dev/null 2>&1'
-clean_tests_cmd = 'scons -c >/dev/null 2>&1'
+clean_tests_cmd = 'make cleancheck >/dev/null 2>&1'
 test_log = '/tmp/test.log'
-test_cmd = 'scons -j8 >%s 2>&1' % test_log
+test_cmd = 'make -j8 check >%s 2>&1' % test_log
 
 const_error_pat_template = r'In function [^(]+ %s\s*\(.*?error: (' + \
     'passing ‘const[^\n]+discards qualifiers|' + \
@@ -395,6 +395,7 @@ def fix_prototypes(root, start_count=0, end_count=0):
     print('Loading call graph...')
     cg = callgraph.Callgraph(root)
     func_count = len(cg.by_callee.keys())
+    sys.exit(0)
     
     previously_analyzed = load_previous_results()
     func_count -= cut_noise(cg, previously_analyzed)
