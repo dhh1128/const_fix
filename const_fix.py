@@ -100,17 +100,12 @@ def improve_param_names(root, prototypes):
 
 def tests_pass(root):
     print('Testing...')
-    oldcwd = os.getcwd()
-    try:
-        os.chdir(os.path.join(root, 'test'))
-        exitcode = run(test_cmd)
-        if exitcode:
-            print('  Tests failed. See %s for details.' % test_log)
-        else:
-            print('  Tests pass.')
-        return exitcode == 0
-    finally:
-        os.chdir(oldcwd)
+    exitcode = run(test_cmd)
+    if exitcode:
+        print('  Tests failed. See %s for details.' % test_log)
+    else:
+        print('  Tests pass.')
+    return exitcode == 0
         
 def get_compile_log_tail():
     with open(compile_log, 'r') as f:
@@ -142,7 +137,6 @@ def compile_is_clean(root, changed_func=None):
                 test_clean = True
                 exitcode = run(compile_cmd)
         if not exitcode:
-            os.chdir(os.path.join(root, 'test'))
             if not test_clean:
                 run(compile_tests_cmd)
                 if exitcode:

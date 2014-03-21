@@ -1,6 +1,6 @@
 import os, re, sys
 
-doxy_output_folder = '/tmp/html'
+doxy_output_folder = '/tmp/torque/html'
 doxy_log = '/tmp/doxy-stdout'
 
 proto_pat = re.compile(r'<td class="memname">(.*?)</td>(.*?)</div>\s*</div>', re.DOTALL)
@@ -129,7 +129,7 @@ def _call_doxygen(folder):
     oldcwd = os.getcwd()
     try:
         os.chdir(folder)
-        exitcode = os.system('doxygen docs/Doxyfile >%s 2>&1' % doxy_log)
+        exitcode = os.system('doxygen Doxyfile >%s 2>&1' % doxy_log)
         return exitcode
     finally:
         os.chdir(oldcwd)
